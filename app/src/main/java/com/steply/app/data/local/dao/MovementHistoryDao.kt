@@ -15,6 +15,9 @@ interface MovementHistoryDao {
     @Query("SELECT * FROM movement_history WHERE profileId = :profileId ORDER BY receivedAt DESC")
     fun observeByProfileId(profileId: String): Flow<List<MovementHistoryEntity>>
 
+    @Query("SELECT * FROM movement_history ORDER BY receivedAt DESC")
+    suspend fun getAll(): List<MovementHistoryEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(history: MovementHistoryEntity)
 

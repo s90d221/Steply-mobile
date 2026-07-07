@@ -4,6 +4,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import com.steply.app.sync.SteplyTlsClientFactory
+import com.steply.app.sync.SteplyWebSessionPayload
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -20,18 +22,30 @@ private const val MAX_FRAME_AGE_MS = 500L
  * It also listens for final PC analysis results so the phone can keep a local history.
  */
 class RemoteCameraStreamer(
-    private val serverUrl: String,
+    private val session: SteplyWebSessionPayload,
     private val onStatus: (String) -> Unit,
     private val onError: (String) -> Unit,
     private val onFinalResult: (String) -> Unit = {},
 ) : AutoCloseable {
-    private val client = OkHttpClient()
+    private val serverUrl = session.webSocketUrl
+    private val client = SteplyTlsClientFactory.build(
+        baseClient = OkHttpClient(),
+        tlsCertSha256 = session.tlsCertSha256,
+    )
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var webSocket: WebSocket? = null
     @Volatile private var connected = false
 
     fun connect() {
         if (connected || webSocket != null) return
+        if (!serverUrl.startsWith("wss://", ignoreCase = true)) {
+            emitError("Refusing to stream camera frames over an unencrypted WebSocket. Scan a fresh HTTPS QR code.")
+            return
+        }
+        if (session.isExpired()) {
+            emitError("The PC pairing QR code has expired. Refresh the QR code on the PC and scan it again.")
+            return
+        }
 
         val request = Request.Builder()
             .url(serverUrl)

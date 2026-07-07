@@ -236,6 +236,8 @@ private fun SafetyNoteSurface(text: String) {
 }
 
 fun parseRecommendedExercisePlan(resultJson: String): RecommendedExercisePlan? {
+    // Display only the recommendation plan produced by the PC web analysis.
+    // Mobile must not derive exercises from pose landmarks or raw movement data.
     return runCatching {
         val json = JSONObject(resultJson)
         val recommendations = json.optJSONArray("recommendations") ?: return null

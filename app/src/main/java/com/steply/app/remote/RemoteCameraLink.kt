@@ -30,9 +30,10 @@ object RemoteCameraLink {
     fun buildWebSocketUrl(host: String): String {
         val trimmed = host.trim()
         return when {
-            trimmed.startsWith("ws://") || trimmed.startsWith("wss://") -> trimmed
-            trimmed.contains(":") -> "ws://$trimmed/ws"
-            else -> "ws://$trimmed:$DefaultPort/ws"
+            trimmed.startsWith("wss://") -> trimmed
+            trimmed.startsWith("ws://") -> trimmed.replaceFirst("ws://", "wss://")
+            trimmed.contains(":") -> "wss://$trimmed/ws"
+            else -> "wss://$trimmed:$DefaultPort/ws"
         }
     }
 

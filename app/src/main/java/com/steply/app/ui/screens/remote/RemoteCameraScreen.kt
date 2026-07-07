@@ -42,6 +42,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.steply.app.AppContainer
 import com.steply.app.remote.RemoteCameraStreamer
+import com.steply.app.sync.CleanupCallback
+import com.steply.app.sync.PcSessionCleanupRequester
+import com.steply.app.sync.SteplyWebClient
 import com.steply.app.sync.SteplyWebSessionPayload
 import com.steply.app.ui.screens.components.StatusChip
 import com.steply.app.ui.screens.components.SteplyCard
@@ -58,12 +61,16 @@ fun RemoteCameraScreen(
     appContainer: AppContainer,
     sessionId: String,
     serverUrl: String,
+    pairingToken: String,
+    expiresAtEpochMs: Long,
+    tlsCertSha256: String?,
     onBack: () -> Unit,
     onChangeProfile: () -> Unit,
     onViewHistory: () -> Unit,
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val cleanupRequester: PcSessionCleanupRequester = remember { SteplyWebClient() }
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED,
@@ -73,10 +80,20 @@ fun RemoteCameraScreen(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted -> hasCameraPermission = granted }
 
-    val session = remember(sessionId, serverUrl) { SteplyWebSessionPayload(sessionId, serverUrl) }
-    var streamer by remember(session.webSocketUrl) { mutableStateOf<RemoteCameraStreamer?>(null) }
-    var streaming by remember(session.webSocketUrl) { mutableStateOf(false) }
-    var statusMessage by remember(session.webSocketUrl) { mutableStateOf("Ready to stream camera frames to the PC.") }
+    val session = remember(sessionId, serverUrl, pairingToken, expiresAtEpochMs, tlsCertSha256) {
+        SteplyWebSessionPayload(
+            sessionId = sessionId,
+            serverUrl = serverUrl,
+            expiresAtEpochMs = expiresAtEpochMs,
+            pairingToken = pairingToken,
+            tlsCertSha256 = tlsCertSha256,
+        )
+    }
+    var streamer by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf<RemoteCameraStreamer?>(null) }
+    var streaming by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf(false) }
+    var statusMessage by remember(session.webSocketUrl, session.tlsCertSha256) {
+        mutableStateOf("Ready to stream camera frames to the PC.")
+    }
     var cameraMessage by remember { mutableStateOf("Checking camera permission.") }
     var sentFrames by remember { mutableIntStateOf(0) }
     var savedHistoryCount by remember { mutableIntStateOf(0) }
@@ -85,9 +102,10 @@ fun RemoteCameraScreen(
     var resultSaved by remember { mutableStateOf(false) }
     var showExerciseMissions by remember { mutableStateOf(false) }
     var checkedMissionIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var selectedVideoUri by remember(session.webSocketUrl) { mutableStateOf<Uri?>(null) }
-    var streamSource by remember(session.webSocketUrl) { mutableStateOf(StreamSource.Camera) }
-    var startPickedVideoStream by remember(session.webSocketUrl) { mutableStateOf(false) }
+    var selectedVideoUri by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf<Uri?>(null) }
+    var streamSource by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf(StreamSource.Camera) }
+    var startPickedVideoStream by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf(false) }
+    var cleanupRequested by remember(session.sessionId, session.serverUrl) { mutableStateOf(false) }
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
     ) { uri ->
@@ -97,7 +115,30 @@ fun RemoteCameraScreen(
         }
     }
 
+    fun requestPcCleanup(reason: String) {
+        if (cleanupRequested || session.pairingToken.isBlank()) return
+        cleanupRequested = true
+        cleanupRequester.requestSessionCleanup(
+            session = session,
+            reason = reason,
+            callback = object : CleanupCallback {
+                override fun onSuccess(body: String, cleanedSession: SteplyWebSessionPayload) {
+                    coroutineScope.launch {
+                        statusMessage = "PC temporary session data was cleared."
+                    }
+                }
+
+                override fun onFailure(message: String) {
+                    coroutineScope.launch {
+                        statusMessage = "PC cleanup request failed. Close the PC session before leaving a shared computer."
+                    }
+                }
+            },
+        )
+    }
+
     fun stopStreaming() {
+        requestPcCleanup("mobile-stream-stopped")
         streamer?.close()
         streamer = null
         streaming = false
@@ -125,7 +166,7 @@ fun RemoteCameraScreen(
         showExerciseMissions = false
         checkedMissionIds = emptySet()
         val newStreamer = RemoteCameraStreamer(
-            serverUrl = session.webSocketUrl,
+            session = session,
             onStatus = { message -> statusMessage = message },
             onError = { message ->
                 statusMessage = message
@@ -172,7 +213,10 @@ fun RemoteCameraScreen(
     }
 
     DisposableEffect(session.webSocketUrl) {
-        onDispose { streamer?.close() }
+        onDispose {
+            requestPcCleanup("mobile-screen-disposed")
+            streamer?.close()
+        }
     }
 
     SteplyScaffold(

@@ -12,13 +12,31 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+interface CleanupCallback {
+    fun onSuccess(body: String, cleanedSession: SteplyWebSessionPayload)
+    fun onFailure(message: String)
+
+    object Noop : CleanupCallback {
+        override fun onSuccess(body: String, cleanedSession: SteplyWebSessionPayload) = Unit
+        override fun onFailure(message: String) = Unit
+    }
+}
+
+interface PcSessionCleanupRequester {
+    fun requestSessionCleanup(
+        session: SteplyWebSessionPayload,
+        reason: String = "mobile-session-ended",
+        callback: CleanupCallback = CleanupCallback.Noop,
+    )
+}
+
 class SteplyWebClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(4, TimeUnit.SECONDS)
         .writeTimeout(4, TimeUnit.SECONDS)
         .build(),
-) {
+) : PcSessionCleanupRequester {
     fun connectProfile(
         session: SteplyWebSessionPayload,
         profile: UserProfile,
@@ -32,6 +50,61 @@ class SteplyWebClient(
             index = 0,
             errors = mutableListOf(),
             callback = callback,
+        )
+    }
+
+    override fun requestSessionCleanup(
+        session: SteplyWebSessionPayload,
+        reason: String,
+        callback: CleanupCallback,
+    ) {
+        val candidates = session.candidateServerUrls.ifEmpty { listOf(session.serverUrl) }.distinct()
+        tryRequestSessionCleanup(
+            session = session,
+            reason = reason,
+            candidates = candidates,
+            index = 0,
+            errors = mutableListOf(),
+            callback = callback,
+        )
+    }
+
+    private fun tryRequestSessionCleanup(
+        session: SteplyWebSessionPayload,
+        reason: String,
+        candidates: List<String>,
+        index: Int,
+        errors: MutableList<String>,
+        callback: CleanupCallback,
+    ) {
+        if (index >= candidates.size) {
+            callback.onFailure(errors.joinToString(separator = "\n"))
+            return
+        }
+
+        val baseUrl = SteplyWebSessionPayload.normalizeUrl(candidates[index])
+        val activeSession = session.withServerUrl(baseUrl)
+        val body = JSONObject()
+            .put("sessionId", activeSession.sessionId)
+            .put("pairingToken", activeSession.pairingToken)
+            .put("reason", reason)
+
+        postJson(
+            session = activeSession,
+            url = "${activeSession.apiBaseUrl}/api/session/${activeSession.sessionId}/cleanup",
+            json = body,
+            onSuccess = { responseBody -> callback.onSuccess(responseBody, activeSession) },
+            onFailure = { message ->
+                errors += "$baseUrl -> $message"
+                tryRequestSessionCleanup(
+                    session = session,
+                    reason = reason,
+                    candidates = candidates,
+                    index = index + 1,
+                    errors = errors,
+                    callback = callback,
+                )
+            },
         )
     }
 
@@ -52,9 +125,11 @@ class SteplyWebClient(
         val activeSession = session.withServerUrl(baseUrl)
         val body = JSONObject()
             .put("sessionId", activeSession.sessionId)
+            .put("pairingToken", activeSession.pairingToken)
             .put("profile", profile.toJson())
 
         postJson(
+            session = activeSession,
             url = "${activeSession.apiBaseUrl}/api/session/${activeSession.sessionId}/connect",
             json = body,
             onSuccess = { responseBody -> callback.onSuccess(responseBody, activeSession) },
@@ -73,17 +148,21 @@ class SteplyWebClient(
     }
 
     private fun postJson(
+        session: SteplyWebSessionPayload,
         url: String,
         json: JSONObject,
         onSuccess: (String) -> Unit,
         onFailure: (String) -> Unit,
     ) {
-        val request = Request.Builder()
+        val requestBuilder = Request.Builder()
             .url(url)
             .post(json.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build()
+        if (session.pairingToken.isNotBlank()) {
+            requestBuilder.header("X-Steply-Pairing-Token", session.pairingToken)
+        }
+        val request = requestBuilder.build()
 
-        client.newCall(request).enqueue(object : Callback {
+        SteplyTlsClientFactory.build(client, session.tlsCertSha256).newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 onFailure(e.message ?: "Network request failed")
             }

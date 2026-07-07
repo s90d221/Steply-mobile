@@ -94,7 +94,7 @@ class RemoteConnectViewModel(
         if (session == null) {
             actionState.update {
                 it.copy(
-                    errorMessage = "This does not look like a Steply Web QR code. Scan the code from the PC dashboard again.",
+                    errorMessage = "This QR code is invalid, expired, already used, or not encrypted. Refresh the HTTPS QR code on the PC and scan it again.",
                     isConnecting = false,
                 )
             }
@@ -114,6 +114,7 @@ class RemoteConnectViewModel(
             profile = profile,
             callback = object : SteplyWebClient.ResultCallback {
                 override fun onSuccess(body: String, connectedSession: SteplyWebSessionPayload) {
+                    SteplyWebSessionLink.markConsumed(connectedSession)
                     viewModelScope.launch {
                         appContainer.settingsRepository.setRemoteCameraHost(connectedSession.serverUrl)
                         actionState.update {
@@ -146,13 +147,13 @@ class RemoteConnectViewModel(
     fun startManualCamera(serverUrl: String) {
         val normalized = serverUrl.trim().trimEnd('/')
         if (normalized.isBlank()) {
-            actionState.update { it.copy(errorMessage = "Enter the Steply Web address. Example: http://YOUR_PC_IP:3000") }
+            actionState.update { it.copy(errorMessage = "Enter the Steply Web address. Example: https://YOUR_PC_IP:3000") }
             return
         }
-        val withScheme = if (normalized.startsWith("http://") || normalized.startsWith("https://")) {
+        val withScheme = if (normalized.startsWith("https://")) {
             normalized
         } else {
-            "http://$normalized"
+            "https://$normalized"
         }
         actionState.update {
             it.copy(linkedSession = SteplyWebSessionPayload(ManualSessionId, withScheme))

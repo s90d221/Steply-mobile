@@ -1,5 +1,8 @@
 package com.steply.app.ui.screens.history
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,10 +14,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -26,12 +36,17 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.steply.app.domain.model.MovementHistory
+import com.steply.app.report.WeeklyReportFormatter
+import com.steply.app.report.WeeklyReportGenerator
+import com.steply.app.report.WeeklyReportStore
+import com.steply.app.report.WeeklyReportWorkScheduler
 import com.steply.app.ui.screens.components.EmptyStateCard
 import com.steply.app.ui.screens.components.StatusChip
 import com.steply.app.ui.screens.components.StatusPill
 import com.steply.app.ui.screens.components.SteplyCard
 import com.steply.app.ui.screens.components.SteplyScaffold
 import com.steply.app.ui.screens.components.SteplyScreenColumn
+import com.steply.app.ui.screens.components.SteplySecondaryButton
 import com.steply.app.ui.screens.components.SteplySpacing
 import com.steply.app.util.formatDisplayDateTime
 import java.util.Locale
@@ -41,6 +56,25 @@ fun HistoryScreen(
     uiState: HistoryUiState,
     onBack: () -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var pendingReportText by remember { mutableStateOf<String?>(null) }
+    var reportShareMessage by remember { mutableStateOf<String?>(null) }
+
+    pendingReportText?.let { reportText ->
+        WeeklyReportConsentDialog(
+            reportText = reportText,
+            onDismiss = { pendingReportText = null },
+            onShare = {
+                pendingReportText = null
+                reportShareMessage = if (shareWeeklyReport(context, reportText)) {
+                    "Share sheet opened. Choose a family or care-team contact to send the report."
+                } else {
+                    "No sharing app is available on this device."
+                }
+            },
+        )
+    }
+
     SteplyScaffold(
         title = "History",
         subtitle = "PC analysis results saved on this phone.",
@@ -57,6 +91,16 @@ fun HistoryScreen(
                 val groupedItems = uiState.items.asReversed().groupBy { it.historyTestCategory() }
 
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    WeeklyReportShareCard(
+                        items = uiState.items,
+                        selectedProfileId = uiState.selectedUserId,
+                        statusMessage = reportShareMessage,
+                        onPrepareReport = { reportText ->
+                            WeeklyReportWorkScheduler.triggerNow(context)
+                            WeeklyReportStore.save(context, reportText, System.currentTimeMillis())
+                            pendingReportText = reportText
+                        },
+                    )
                     HistoryOverviewTrends(
                         standingItems = groupedItems[HistoryTestCategory.STANDING].orEmpty(),
                         chairStandItems = groupedItems[HistoryTestCategory.CHAIR_STAND].orEmpty(),
@@ -81,6 +125,107 @@ fun HistoryScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun WeeklyReportShareCard(
+    items: List<MovementHistory>,
+    selectedProfileId: String?,
+    statusMessage: String?,
+    onPrepareReport: (String) -> Unit,
+) {
+    val reportText = remember(items, selectedProfileId) {
+        WeeklyReportGenerator.generate(
+            items = items,
+            selectedProfileId = selectedProfileId,
+        )?.let(WeeklyReportFormatter::format)
+    }
+
+    SteplyCard {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Weekly care report",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = if (selectedProfileId == null) {
+                    "Select a profile before sharing a weekly report."
+                } else {
+                    "Share saved PC final results for the selected profile with family or a care worker. The report excludes camera frames, pose landmarks, raw JSON, profile id, and session id."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            SteplySecondaryButton(
+                text = "Review and share weekly report",
+                icon = Icons.Default.Share,
+                onClick = { reportText?.let(onPrepareReport) },
+                enabled = reportText != null,
+            )
+            statusMessage?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeeklyReportConsentDialog(
+    reportText: String,
+    onDismiss: () -> Unit,
+    onShare: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Share weekly report?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "This shares saved PC final results with the contact you choose. It does not include raw camera frames, pose landmarks, raw JSON, profile id, or session id.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text = reportText,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onShare) {
+                Text("Share")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+private fun shareWeeklyReport(
+    context: Context,
+    reportText: String,
+): Boolean {
+    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, "Steply weekly movement report")
+        putExtra(Intent.EXTRA_TEXT, reportText)
+    }
+    val chooser = Intent.createChooser(sendIntent, "Share Steply weekly report")
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    return try {
+        context.startActivity(chooser)
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
     }
 }
 
@@ -189,7 +334,7 @@ private fun HistoryTrendCard(
             SparklineChart(
                 points = trendPoints,
                 lineColor = trendColor,
-                improveByIncrease = category.isImprovedByIncrease(),
+                positiveByIncrease = category.isPositiveDisplayDirectionByIncrease(),
             )
 
             Row(
@@ -215,7 +360,7 @@ private fun HistoryTrendCard(
 private fun SparklineChart(
     points: List<HistoryTrendPoint>,
     lineColor: Color,
-    improveByIncrease: Boolean,
+    positiveByIncrease: Boolean,
 ) {
     val values = points.map { it.value }
     val minValue = values.minOrNull() ?: 0
@@ -239,8 +384,8 @@ private fun SparklineChart(
             val startY = chartHeight - ((previousPoint.value - minValue).toFloat() / range.toFloat() * chartHeight)
             val endY = chartHeight - ((currentPoint.value - minValue).toFloat() / range.toFloat() * chartHeight)
             val segmentColor = when {
-                currentPoint.value > previousPoint.value && improveByIncrease -> Color(0xFF1B8F3A)
-                currentPoint.value < previousPoint.value && improveByIncrease -> Color(0xFFC62828)
+                currentPoint.value > previousPoint.value && positiveByIncrease -> Color(0xFF1B8F3A)
+                currentPoint.value < previousPoint.value && positiveByIncrease -> Color(0xFFC62828)
                 else -> lineColor
             }
 
@@ -341,6 +486,9 @@ private fun MovementHistory.historyTestCategory(): HistoryTestCategory {
 }
 
 private fun MovementHistory.trendMetricValue(category: HistoryTestCategory): Int? {
+    // Presentation-only metric selection from PC final result fields already stored on the phone.
+    // Do not parse rawJson/landmarks here or derive STEADI risk, weakness, or recommendations;
+    // those remain the PC web analysis responsibility.
     return when (category) {
         HistoryTestCategory.CHAIR_STAND -> repetitionCount ?: score
         HistoryTestCategory.TUG -> score ?: durationSeconds
@@ -349,7 +497,7 @@ private fun MovementHistory.trendMetricValue(category: HistoryTestCategory): Int
     }
 }
 
-private fun HistoryTestCategory.isImprovedByIncrease(): Boolean {
+private fun HistoryTestCategory.isPositiveDisplayDirectionByIncrease(): Boolean {
     return true
 }
 
@@ -382,9 +530,9 @@ private fun TrendComparisonBanner(
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val comparisonText = when {
-        comparison.delta > 0 -> "최근 3일 평균이 이전 3일보다 좋아졌어요."
-        comparison.delta < 0 -> "최근 3일 평균이 이전 3일보다 나빠졌어요."
-        else -> "최근 3일 평균이 이전 3일과 같아요."
+        comparison.delta > 0 -> "최근 3일 저장 점수 평균이 이전 3일보다 올랐어요."
+        comparison.delta < 0 -> "최근 3일 저장 점수 평균이 이전 3일보다 낮아졌어요."
+        else -> "최근 3일 저장 점수 평균이 이전 3일과 같아요."
     }
 
     Surface(
@@ -410,6 +558,11 @@ private fun TrendComparisonBanner(
             )
             Text(
                 text = "최근 3일 평균 ${comparison.recentAverageText()} · 이전 3일 평균 ${comparison.previousAverageText()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = color,
+            )
+            Text(
+                text = DisplayTrendNotice,
                 style = MaterialTheme.typography.bodySmall,
                 color = color,
             )
@@ -456,6 +609,8 @@ private data class TrendSample(
 )
 
 private fun List<MovementHistory>.trendComparison(category: HistoryTestCategory): TrendComparison? {
+    // Display-only arithmetic trend over PC-provided final score/count/duration values.
+    // This is not a clinical risk decision and must not re-analyze raw pose data.
     val samples = mapNotNull { item ->
         item.trendMetricValue(category)?.let { value ->
             TrendSample(
@@ -513,6 +668,8 @@ private fun TrendComparison.recentAverageText(): String {
 private fun TrendComparison.previousAverageText(): String {
     return String.format(Locale.US, "%.1f", previousAverage)
 }
+
+private const val DisplayTrendNotice = "표시용 산술 추세이며 임상 판정이 아니에요."
 
 @Composable
 private fun HistoryItemCard(item: MovementHistory) {

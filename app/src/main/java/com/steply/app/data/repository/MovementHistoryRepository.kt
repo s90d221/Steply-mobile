@@ -19,6 +19,10 @@ class MovementHistoryRepository(
         return movementHistoryDao.observeByProfileId(profileId).map { list -> list.map { it.toDomain() } }
     }
 
+    suspend fun getAll(): List<MovementHistory> {
+        return movementHistoryDao.getAll().map { it.toDomain() }
+    }
+
     suspend fun saveFromPcResult(resultJson: String) {
         val now = System.currentTimeMillis()
         val json = JSONObject(resultJson)
@@ -28,6 +32,8 @@ class MovementHistoryRepository(
             ?: "unknown-profile"
         val profileName = profile?.optString("displayName")?.takeIf { it.isNotBlank() }
             ?: profile?.optString("name")?.takeIf { it.isNotBlank() }
+        // Persist scalar fields from the PC final result only. Mobile must not derive
+        // fall-risk levels, weak body areas, or exercise recommendations from raw pose data.
         val features = json.optJSONObject("features")
         val flagsText = json.optJSONArray("flags")?.joinText()
 

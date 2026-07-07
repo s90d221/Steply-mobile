@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -24,16 +23,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.FitnessCenter
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -72,91 +64,6 @@ fun SteplyScaffold(
         },
         bottomBar = bottomBar,
         content = content,
-    )
-}
-
-enum class SteplyMainTab {
-    Today,
-    Check,
-    History,
-    Settings,
-}
-
-@Composable
-fun SteplyBottomNavigation(
-    currentTab: SteplyMainTab,
-    onToday: () -> Unit,
-    onCheck: () -> Unit,
-    onHistory: () -> Unit,
-    onSettings: () -> Unit,
-) {
-    val compactHeight = LocalConfiguration.current.screenHeightDp < 500
-
-    NavigationBar(
-        modifier = if (compactHeight) Modifier.height(64.dp) else Modifier,
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 4.dp,
-    ) {
-        SteplyBottomNavigationItem(
-            selected = currentTab == SteplyMainTab.Today,
-            label = "Today",
-            icon = { Icon(imageVector = Icons.Default.Home, contentDescription = null) },
-            onClick = onToday,
-            showLabel = !compactHeight,
-        )
-        SteplyBottomNavigationItem(
-            selected = currentTab == SteplyMainTab.Check,
-            label = "Check",
-            icon = { Icon(imageVector = Icons.Default.FitnessCenter, contentDescription = null) },
-            onClick = onCheck,
-            showLabel = !compactHeight,
-        )
-        SteplyBottomNavigationItem(
-            selected = currentTab == SteplyMainTab.History,
-            label = "History",
-            icon = { Icon(imageVector = Icons.Default.History, contentDescription = null) },
-            onClick = onHistory,
-            showLabel = !compactHeight,
-        )
-        SteplyBottomNavigationItem(
-            selected = currentTab == SteplyMainTab.Settings,
-            label = "Settings",
-            icon = { Icon(imageVector = Icons.Default.Settings, contentDescription = null) },
-            onClick = onSettings,
-            showLabel = !compactHeight,
-        )
-    }
-}
-
-@Composable
-private fun RowScope.SteplyBottomNavigationItem(
-    selected: Boolean,
-    label: String,
-    icon: @Composable () -> Unit,
-    onClick: () -> Unit,
-    showLabel: Boolean = true,
-) {
-    NavigationBarItem(
-        selected = selected,
-        onClick = onClick,
-        icon = icon,
-        label = if (showLabel) {
-            {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            }
-        } else {
-            null
-        },
-        colors = NavigationBarItemDefaults.colors(
-            selectedIconColor = MaterialTheme.colorScheme.primary,
-            selectedTextColor = MaterialTheme.colorScheme.primary,
-            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-        ),
     )
 }
 

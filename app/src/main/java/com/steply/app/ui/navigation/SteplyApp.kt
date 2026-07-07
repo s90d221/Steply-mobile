@@ -121,7 +121,7 @@ fun SteplyApp(
 
             LaunchedEffect(uiState.linkedSession) {
                 val session = uiState.linkedSession ?: return@LaunchedEffect
-                navController.navigate(Routes.remoteCamera(session.sessionId, session.serverUrl)) {
+                navController.navigate(Routes.remoteCamera(session)) {
                     launchSingleTop = true
                 }
                 viewModel.onLinkedSessionNavigationHandled()
@@ -157,14 +157,34 @@ fun SteplyApp(
             arguments = listOf(
                 navArgument("sessionId") { type = NavType.StringType },
                 navArgument("serverUrl") { type = NavType.StringType },
+                navArgument("pairingToken") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+                navArgument("expiresAtEpochMs") {
+                    type = NavType.LongType
+                    defaultValue = Long.MAX_VALUE
+                },
+                navArgument("tlsCertSha256") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
             ),
         ) { entry ->
             val sessionId = entry.arguments?.getString("sessionId").orEmpty()
             val serverUrl = entry.arguments?.getString("serverUrl").orEmpty()
+            val pairingToken = entry.arguments?.getString("pairingToken").orEmpty()
+            val expiresAtEpochMs = entry.arguments?.getLong("expiresAtEpochMs") ?: Long.MAX_VALUE
+            val tlsCertSha256 = entry.arguments
+                ?.getString("tlsCertSha256")
+                ?.takeIf { it.isNotBlank() }
             RemoteCameraScreen(
                 appContainer = appContainer,
                 sessionId = sessionId,
                 serverUrl = serverUrl,
+                pairingToken = pairingToken,
+                expiresAtEpochMs = expiresAtEpochMs,
+                tlsCertSha256 = tlsCertSha256,
                 onBack = { navController.popBackStack() },
                 onChangeProfile = { navController.navigate(Routes.ProfileList) },
                 onViewHistory = { navController.navigate(Routes.History) },
