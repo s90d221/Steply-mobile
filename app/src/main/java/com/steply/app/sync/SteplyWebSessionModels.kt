@@ -2,7 +2,6 @@ package com.steply.app.sync
 
 import org.json.JSONObject
 import java.net.URI
-import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -15,10 +14,14 @@ import java.util.Collections
  * Supported QR JSON:
  * {
  *   "type": "steply-web-session",
+ *   "version": 3,
+ *   "connectionSessionId": "...",
  *   "sessionId": "...",
+ *   "assessmentSessionSchemaVersion": "assessment_session.v2",
  *   "serverUrl": "https://192.168.0.12:3000",
  *   "serverUrls": ["https://192.168.0.12:3000", "https://192.168.0.12:5173"],
  *   "expiresAt": "ISO_8601_UTC_EXPIRY",
+ *   "expiresAtEpochMs": 1234567890000,
  *   "pairingToken": "one-time-random-token",
  *   "tlsCertSha256": "optional-lowercase-hex-der-leaf-cert-sha256"
  * }
@@ -76,9 +79,7 @@ object SteplyWebSessionLink {
         val trimmed = rawValue.trim()
         if (trimmed.isBlank()) return null
 
-        parseJson(trimmed, nowEpochMs)?.let { return it }
-        parseUri(trimmed, nowEpochMs)?.let { return it }
-        return null
+        return parseJson(trimmed, nowEpochMs)
     }
 
     fun markConsumed(payload: SteplyWebSessionPayload) {
@@ -95,56 +96,38 @@ object SteplyWebSessionLink {
     ): SteplyWebSessionPayload? {
         return runCatching {
             val json = JSONObject(rawValue)
-            val type = json.optString("type")
-            if (type != "steply-web-session") return@runCatching null
+            val keys = json.keys().asSequence().toSet()
+            if (keys !in STRICT_QR_KEY_SETS) return@runCatching null
+            if (json.getString("type") != "steply-web-session") return@runCatching null
+            if (json.getInt("version") != 3) return@runCatching null
+            if (json.getString("assessmentSessionSchemaVersion") != "assessment_session.v2") return@runCatching null
 
-            val sessionId = json.optString("sessionId").trim()
-            val serverUrl = SteplyWebSessionPayload.normalizeUrl(json.optString("serverUrl"))
+            val connectionSessionId = json.getString("connectionSessionId").trim()
+            val sessionId = json.getString("sessionId").trim()
+            if (connectionSessionId != sessionId) return@runCatching null
+            val serverUrl = SteplyWebSessionPayload.normalizeUrl(json.getString("serverUrl"))
             val expiresAtEpochMs = parseExpiry(json) ?: return@runCatching null
-            val pairingToken = json.optString("pairingToken").trim()
-            val tlsCertSha256 = parseTlsCertSha256(json.optString("tlsCertSha256"))
+            val pairingToken = json.getString("pairingToken").trim()
+            val tlsCertSha256 = if (json.has("tlsCertSha256")) {
+                parseTlsCertSha256(json.getString("tlsCertSha256"))
+            } else {
+                null
+            }
 
-            val candidates = mutableListOf<String>()
-            val serverUrls = json.optJSONArray("serverUrls")
-            if (serverUrls != null) {
-                for (i in 0 until serverUrls.length()) {
-                    val value = SteplyWebSessionPayload.normalizeUrl(serverUrls.optString(i))
-                    if (value.isNotBlank()) candidates += value
+            val serverUrls = json.getJSONArray("serverUrls")
+            if (serverUrls.length() == 0) return@runCatching null
+            val candidates = buildList {
+                for (index in 0 until serverUrls.length()) {
+                    val value = SteplyWebSessionPayload.normalizeUrl(serverUrls.getString(index))
+                    if (!SteplyWebSessionPayload.isSecureApiUrl(value)) return@runCatching null
+                    add(value)
                 }
             }
-            if (serverUrl.isNotBlank()) candidates += serverUrl
+            if (serverUrl !in candidates) return@runCatching null
             buildPayload(
                 sessionId = sessionId,
                 serverUrl = serverUrl,
                 candidateServerUrls = candidates,
-                expiresAtEpochMs = expiresAtEpochMs,
-                pairingToken = pairingToken,
-                tlsCertSha256 = tlsCertSha256,
-                nowEpochMs = nowEpochMs,
-            )
-        }.getOrNull()
-    }
-
-    private fun parseUri(
-        rawValue: String,
-        nowEpochMs: Long,
-    ): SteplyWebSessionPayload? {
-        return runCatching {
-            val uri = URI(rawValue)
-            val scheme = uri.scheme?.lowercase()
-            if (scheme != "steply" || uri.host != "web-session") return@runCatching null
-
-            val params = uri.queryParameters()
-            val sessionId = params["sessionId"]?.trim().orEmpty()
-            val serverUrl = params["serverUrl"]?.let { SteplyWebSessionPayload.normalizeUrl(it) }.orEmpty()
-            val expiresAtEpochMs = parseExpiry(params) ?: return@runCatching null
-            val pairingToken = params["pairingToken"]?.trim().orEmpty()
-            val tlsCertSha256 = parseTlsCertSha256(params["tlsCertSha256"].orEmpty())
-
-            buildPayload(
-                sessionId = sessionId,
-                serverUrl = serverUrl,
-                candidateServerUrls = listOf(serverUrl),
                 expiresAtEpochMs = expiresAtEpochMs,
                 pairingToken = pairingToken,
                 tlsCertSha256 = tlsCertSha256,
@@ -185,21 +168,10 @@ object SteplyWebSessionLink {
     }
 
     private fun parseExpiry(json: JSONObject): Long? {
-        if (json.has("expiresAtEpochMs")) {
-            val value = json.optLong("expiresAtEpochMs", Long.MIN_VALUE)
-            if (value > 0) return value
-        }
-
-        val expiresAt = json.optString("expiresAt").trim()
-        if (expiresAt.isBlank()) return null
-        return runCatching { Instant.parse(expiresAt).toEpochMilli() }.getOrNull()
-    }
-
-    private fun parseExpiry(params: Map<String, String>): Long? {
-        params["expiresAtEpochMs"]?.toLongOrNull()?.let { if (it > 0) return it }
-        val expiresAt = params["expiresAt"]?.trim().orEmpty()
-        if (expiresAt.isBlank()) return null
-        return runCatching { Instant.parse(expiresAt).toEpochMilli() }.getOrNull()
+        val epoch = json.getLong("expiresAtEpochMs").takeIf { it > 0L } ?: return null
+        val parsed = runCatching { Instant.parse(json.getString("expiresAt")).toEpochMilli() }.getOrNull()
+            ?: return null
+        return epoch.takeIf { it == parsed }
     }
 
     private fun parseTlsCertSha256(rawValue: String): String? {
@@ -230,20 +202,6 @@ private object SteplyPairingTokenReplayCache {
     }
 }
 
-private fun URI.queryParameters(): Map<String, String> {
-    val query = rawQuery ?: return emptyMap()
-    return query
-        .split("&")
-        .filter { it.isNotBlank() }
-        .mapNotNull { pair ->
-            val key = pair.substringBefore("=")
-            val value = pair.substringAfter("=", "")
-            val decodedKey = key.urlDecode()
-            if (decodedKey.isBlank()) null else decodedKey to value.urlDecode()
-        }
-        .toMap()
-}
-
 private fun String.toWebSocketBaseUrl(): String {
     return when {
         startsWith("https://", ignoreCase = true) -> "wss://${substringAfter("://")}"
@@ -256,10 +214,6 @@ private fun String.urlEncode(): String {
     return URLEncoder.encode(this, StandardCharsets.UTF_8.name()).replace("+", "%20")
 }
 
-private fun String.urlDecode(): String {
-    return URLDecoder.decode(this, StandardCharsets.UTF_8.name())
-}
-
 private fun String.sha256Hex(): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(toByteArray(StandardCharsets.UTF_8))
     return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
@@ -267,3 +221,19 @@ private fun String.sha256Hex(): String {
 
 private const val MIN_PAIRING_TOKEN_LENGTH = 16
 private val TLS_CERT_SHA256_REGEX = Regex("^[0-9a-f]{64}$")
+private val STRICT_QR_REQUIRED_KEYS = setOf(
+    "type",
+    "version",
+    "connectionSessionId",
+    "sessionId",
+    "assessmentSessionSchemaVersion",
+    "serverUrl",
+    "serverUrls",
+    "expiresAt",
+    "expiresAtEpochMs",
+    "pairingToken",
+)
+private val STRICT_QR_KEY_SETS = setOf(
+    STRICT_QR_REQUIRED_KEYS,
+    STRICT_QR_REQUIRED_KEYS + "tlsCertSha256",
+)

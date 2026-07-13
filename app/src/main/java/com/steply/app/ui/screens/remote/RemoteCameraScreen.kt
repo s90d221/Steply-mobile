@@ -2,8 +2,8 @@ package com.steply.app.ui.screens.remote
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -20,7 +20,6 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
@@ -34,16 +33,27 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.steply.app.AppContainer
+import com.steply.app.care.CareAgentProjectionFactory
+import com.steply.app.care.CareAgentProjectionJsonCodec
+import com.steply.app.data.repository.AssessmentUpdateResult
+import com.steply.app.domain.model.hasScoredAggregate
+import com.steply.app.domain.model.ExerciseId
+import com.steply.app.domain.model.WorkoutProgress
+import com.steply.app.sync.AssessmentSessionJsonCodec
+import com.steply.app.sync.LandmarkSeriesJsonCodec
 import com.steply.app.remote.RemoteCameraStreamer
 import com.steply.app.sync.CleanupCallback
 import com.steply.app.sync.PcSessionCleanupRequester
+import com.steply.app.sync.PcCleanupGate
 import com.steply.app.sync.SteplyWebClient
 import com.steply.app.sync.SteplyWebSessionPayload
 import com.steply.app.ui.screens.components.StatusChip
@@ -59,15 +69,41 @@ import kotlinx.coroutines.launch
 @Composable
 fun RemoteCameraScreen(
     appContainer: AppContainer,
-    sessionId: String,
-    serverUrl: String,
-    pairingToken: String,
-    expiresAtEpochMs: Long,
-    tlsCertSha256: String?,
     onBack: () -> Unit,
     onChangeProfile: () -> Unit,
     onViewHistory: () -> Unit,
 ) {
+    val activeAssessment by appContainer.assessmentSessionRepository.observeActive()
+        .collectAsStateWithLifecycle(initialValue = null)
+    val persistedAssessment = activeAssessment
+    if (persistedAssessment == null) {
+        SteplyScaffold(
+            title = "Assessment session",
+            subtitle = "No active assessment is available on this phone.",
+            onBack = onBack,
+        ) { paddingValues ->
+            SteplyScreenColumn(paddingValues = paddingValues) {
+                SteplyCard {
+                    Text(
+                        text = "Scan a new PC QR code to start or resume an assessment.",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+            }
+        }
+        return
+    }
+    val session = persistedAssessment.connection
+    val assessmentEnvelope = persistedAssessment.envelope
+    val currentAssessmentEnvelope by rememberUpdatedState(assessmentEnvelope)
+    val careState by appContainer.careAgentRepository.observeState(assessmentEnvelope.session.profileId)
+        .collectAsStateWithLifecycle(initialValue = null)
+    val latestCareDecision by appContainer.careAgentRepository.observeLatestDecisionSummary(assessmentEnvelope.session.profileId)
+        .collectAsStateWithLifecycle(initialValue = null)
+    val careProjection = careState?.let { state ->
+        CareAgentProjectionFactory.createFromSummary(state, latestCareDecision)
+    }
+    val currentCareProjection by rememberUpdatedState(careProjection)
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val cleanupRequester: PcSessionCleanupRequester = remember { SteplyWebClient() }
@@ -80,181 +116,257 @@ fun RemoteCameraScreen(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted -> hasCameraPermission = granted }
 
-    val session = remember(sessionId, serverUrl, pairingToken, expiresAtEpochMs, tlsCertSha256) {
-        SteplyWebSessionPayload(
-            sessionId = sessionId,
-            serverUrl = serverUrl,
-            expiresAtEpochMs = expiresAtEpochMs,
-            pairingToken = pairingToken,
-            tlsCertSha256 = tlsCertSha256,
-        )
-    }
     var streamer by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf<RemoteCameraStreamer?>(null) }
     var streaming by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf(false) }
     var statusMessage by remember(session.webSocketUrl, session.tlsCertSha256) {
         mutableStateOf("Ready to stream camera frames to the PC.")
     }
     var cameraMessage by remember { mutableStateOf("Checking camera permission.") }
-    var sentFrames by remember { mutableIntStateOf(0) }
+    var confirmedFrames by remember { mutableIntStateOf(0) }
     var savedHistoryCount by remember { mutableIntStateOf(0) }
-    var latestExercisePlan by remember { mutableStateOf<RecommendedExercisePlan?>(null) }
-    var finalResultReceived by remember { mutableStateOf(false) }
-    var resultSaved by remember { mutableStateOf(false) }
+    var latestExercisePlan by remember { mutableStateOf(parseRecommendedExercisePlan(assessmentEnvelope.session)) }
+    var finalResultReceived by remember { mutableStateOf(assessmentEnvelope.session.hasScoredAggregate()) }
+    var resultSaved by remember { mutableStateOf(assessmentEnvelope.session.hasScoredAggregate()) }
     var showExerciseMissions by remember { mutableStateOf(false) }
-    var checkedMissionIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var selectedVideoUri by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf<Uri?>(null) }
-    var streamSource by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf(StreamSource.Camera) }
-    var startPickedVideoStream by remember(session.webSocketUrl, session.tlsCertSha256) { mutableStateOf(false) }
-    var cleanupRequested by remember(session.sessionId, session.serverUrl) { mutableStateOf(false) }
-    val videoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
-    ) { uri ->
-        if (uri != null) {
-            selectedVideoUri = uri
-            startPickedVideoStream = true
-        }
+    var workoutProgress by remember { mutableStateOf<WorkoutProgress?>(null) }
+    val cleanupGate = remember(session.sessionId, session.serverUrl) { PcCleanupGate() }
+    val pendingLandmarkPayloads = remember(session.sessionId) { mutableListOf<String>() }
+    val streamerOwner = remember(session.webSocketUrl, session.tlsCertSha256) {
+        CameraStreamerOwner<RemoteCameraStreamer>()
+    }
+    val autoStartGate = remember(session.sessionId, assessmentEnvelope.session.assessmentSessionId) {
+        CameraAutoStartGate()
+    }
+    val previewAckTracker = remember(session.sessionId, assessmentEnvelope.session.assessmentSessionId) {
+        CameraPreviewAckTracker()
     }
 
-    fun requestPcCleanup(reason: String) {
-        if (cleanupRequested || session.pairingToken.isBlank()) return
-        cleanupRequested = true
+    LaunchedEffect(careState?.stateVersion) {
+        streamer?.sendLatestCareAgentProjection()
+    }
+    LaunchedEffect(latestExercisePlan?.planId) {
+        val plan = latestExercisePlan
+        if (plan == null || plan.exerciseStartBlocked || plan.exercises.isEmpty()) {
+            workoutProgress = null
+            return@LaunchedEffect
+        }
+        val exerciseIds = plan.exercises.map { ExerciseId.valueOf(it.id) }
+        val workout = appContainer.workoutRepository.getOrCreateOpenWorkout(
+            plan.profileId,
+            plan.planId,
+            exerciseIds,
+        )
+        appContainer.workoutRepository.observeWorkout(workout.workoutSessionId).collect {
+            workoutProgress = it
+        }
+    }
+    fun requestPcCleanup(reason: String, onCleaned: suspend () -> Unit) {
+        if (!cleanupGate.begin()) return
+        if (session.pairingToken.isBlank()) {
+            cleanupGate.failed()
+            statusMessage = "Cannot clear the PC session without its pairing credential. Reconnect before leaving the PC."
+            return
+        }
         cleanupRequester.requestSessionCleanup(
             session = session,
             reason = reason,
             callback = object : CleanupCallback {
                 override fun onSuccess(body: String, cleanedSession: SteplyWebSessionPayload) {
                     coroutineScope.launch {
+                        cleanupGate.succeeded()
                         statusMessage = "PC temporary session data was cleared."
+                        onCleaned()
                     }
                 }
 
                 override fun onFailure(message: String) {
                     coroutineScope.launch {
-                        statusMessage = "PC cleanup request failed. Close the PC session before leaving a shared computer."
+                        cleanupGate.failed()
+                        statusMessage = "PC cleanup failed. Tap End PC session to retry before leaving a shared computer."
                     }
                 }
             },
         )
     }
 
-    fun stopStreaming() {
-        requestPcCleanup("mobile-stream-stopped")
-        streamer?.close()
+    suspend fun persistLandmarksAndAck(rawJson: String): LandmarkSaveOutcome {
+        return runCatching {
+            appContainer.landmarkSeriesRepository.persistFinalized(rawJson)
+        }.fold(
+            onSuccess = { receipt ->
+                streamer?.sendLandmarkSeriesAck(LandmarkSeriesJsonCodec.encodeAck(receipt.envelope, receipt.storedAt))
+                statusMessage = "Landmark time series saved locally on this phone."
+                LandmarkSaveOutcome.STORED
+            },
+            onFailure = { error ->
+                val notReady = error.message?.contains("unknown assessment") == true ||
+                    error.message?.contains("unknown attempt") == true ||
+                    error.message?.contains("terminal result") == true
+                if (notReady) {
+                    LandmarkSaveOutcome.NOT_READY
+                } else {
+                    statusMessage = "Rejected an invalid landmark series: ${error.message ?: "unknown error"}"
+                    LandmarkSaveOutcome.REJECTED
+                }
+            },
+        )
+    }
+
+    fun endPcSession() {
+        autoStartGate.markStoppedByUser()
+        streamerOwner.closeCurrent()
         streamer = null
         streaming = false
-        statusMessage = if (streamSource == StreamSource.DemoVideo) {
-            "Demo video stream stopped."
-        } else {
-            "Camera stream stopped."
+        requestPcCleanup("mobile-session-ended") {
+            appContainer.assessmentSessionRepository.deactivate(assessmentEnvelope.session.assessmentSessionId)
+            onBack()
         }
     }
 
-    fun startStreaming(source: StreamSource) {
-        if (source == StreamSource.Camera && !hasCameraPermission) {
+    fun stopStreaming() {
+        autoStartGate.markStoppedByUser()
+        streamerOwner.closeCurrent()
+        streamer = null
+        streaming = false
+        statusMessage = "Camera stream stopped."
+    }
+
+    BackHandler(onBack = ::endPcSession)
+
+    fun startStreaming() {
+        if (!hasCameraPermission) {
             permissionLauncher.launch(Manifest.permission.CAMERA)
             return
         }
-        if (source == StreamSource.DemoVideo && selectedVideoUri == null) {
-            videoPickerLauncher.launch("video/*")
-            return
-        }
-        streamer?.close()
-        streamSource = source
+        autoStartGate.markStarted()
         resultSaved = false
         finalResultReceived = false
         latestExercisePlan = null
         showExerciseMissions = false
-        checkedMissionIds = emptySet()
-        val newStreamer = RemoteCameraStreamer(
+        workoutProgress = null
+        previewAckTracker.reset()
+        confirmedFrames = 0
+        lateinit var newStreamer: RemoteCameraStreamer
+        newStreamer = RemoteCameraStreamer(
             session = session,
             onStatus = { message -> statusMessage = message },
             onError = { message ->
-                statusMessage = message
-                streaming = false
-                streamer = null
-            },
-            onFinalResult = { resultJson ->
-                finalResultReceived = true
-                parseRecommendedExercisePlan(resultJson)?.let { plan ->
-                    latestExercisePlan = plan
-                    showExerciseMissions = false
-                    checkedMissionIds = emptySet()
+                if (streamerOwner.closeIfOwned(newStreamer)) {
+                    statusMessage = message
+                    streaming = false
+                    streamer = null
                 }
+            },
+            assessmentSessionId = assessmentEnvelope.session.assessmentSessionId,
+            lastRevision = { currentAssessmentEnvelope.revision },
+            sessionSnapshot = {
+                AssessmentSessionJsonCodec.sessionToJson(currentAssessmentEnvelope.session).toString()
+            },
+            careAgentProjection = { currentCareProjection },
+            onAssessmentUpdate = { envelopeJson ->
                 coroutineScope.launch {
                     runCatching {
-                        appContainer.movementHistoryRepository.saveFromPcResult(resultJson)
+                        val decoded = AssessmentSessionJsonCodec.decode(envelopeJson)
+                        val updateResult = appContainer.assessmentSessionRepository.applyEnvelope(envelopeJson)
+                        decoded to updateResult
                     }.onSuccess {
-                        savedHistoryCount += 1
-                        resultSaved = true
-                        statusMessage = "PC analysis complete. Result saved to local history."
+                        val (decoded, updateResult) = it
+                        streamer?.sendAssessmentAck(decoded.messageId, decoded.session.assessmentSessionId, decoded.revision)
+                        if (updateResult == AssessmentUpdateResult.APPLIED && decoded.session.hasScoredAggregate()) {
+                            appContainer.careAgentEventIngestor.assessmentUpdated(
+                                profileId = decoded.session.profileId,
+                                assessmentSessionId = decoded.session.assessmentSessionId,
+                                revision = decoded.revision,
+                                occurredAt = decoded.session.updatedAt,
+                            )
+                        }
+                        statusMessage = "Assessment state updated and saved on this phone."
+                        val queued = pendingLandmarkPayloads.toList()
+                        queued.forEach { pending ->
+                            if (persistLandmarksAndAck(pending) != LandmarkSaveOutcome.NOT_READY) {
+                                pendingLandmarkPayloads.remove(pending)
+                            }
+                        }
                     }.onFailure { error ->
-                        resultSaved = false
-                        statusMessage = "Could not save the PC result: ${error.message ?: "unknown error"}"
+                        statusMessage = "Rejected an invalid assessment update: ${error.message ?: "unknown error"}"
                     }
                 }
             },
+            onLandmarkSeries = { landmarkJson ->
+                coroutineScope.launch {
+                    runCatching { LandmarkSeriesJsonCodec.decodeFinalized(landmarkJson) }.onSuccess {
+                        if (persistLandmarksAndAck(landmarkJson) == LandmarkSaveOutcome.NOT_READY &&
+                            landmarkJson !in pendingLandmarkPayloads
+                        ) {
+                            pendingLandmarkPayloads += landmarkJson
+                        }
+                    }.onFailure { error ->
+                        statusMessage = "Rejected an invalid landmark series: ${error.message ?: "unknown error"}"
+                    }
+                }
+            },
+            onCameraFrameAck = { ack ->
+                if (streamerOwner.owns(newStreamer) && previewAckTracker.record(ack)) {
+                    confirmedFrames = previewAckTracker.confirmedFrameCount
+                }
+            },
+            onFinalResult = {
+                statusMessage = "A legacy single-test result was ignored. Waiting for the aggregate assessment update."
+            },
         )
+        streamerOwner.replace(newStreamer)
         streamer = newStreamer
         streaming = true
-        sentFrames = 0
-        statusMessage = if (source == StreamSource.DemoVideo) {
-            "Connecting demo video stream to Steply Web: ${session.webSocketUrl}"
-        } else {
-            "Connecting to Steply Web: ${session.webSocketUrl}"
-        }
+        statusMessage = "Connecting to Steply Web: ${session.webSocketUrl}"
         newStreamer.connect()
     }
 
-    LaunchedEffect(startPickedVideoStream, selectedVideoUri) {
-        if (startPickedVideoStream && selectedVideoUri != null) {
-            startPickedVideoStream = false
-            startStreaming(StreamSource.DemoVideo)
+    val assessmentIncomplete = !assessmentEnvelope.session.hasScoredAggregate()
+    LaunchedEffect(hasCameraPermission, assessmentIncomplete, autoStartGate) {
+        if (autoStartGate.consumeIfAllowed(hasCameraPermission, assessmentIncomplete)) startStreaming()
+    }
+
+    LaunchedEffect(assessmentEnvelope.revision) {
+        val aggregateReady = assessmentEnvelope.session.hasScoredAggregate()
+        finalResultReceived = aggregateReady
+        resultSaved = aggregateReady
+        latestExercisePlan = if (aggregateReady) parseRecommendedExercisePlan(assessmentEnvelope.session) else null
+        if (aggregateReady && streaming) {
+            streamerOwner.closeCurrent()
+            streamer = null
+            streaming = false
+            savedHistoryCount = 1
+            statusMessage = "STEADI assessment complete. Aggregate result saved to local history."
         }
     }
 
-    DisposableEffect(session.webSocketUrl) {
+    DisposableEffect(streamerOwner) {
         onDispose {
-            requestPcCleanup("mobile-screen-disposed")
-            streamer?.close()
+            streamerOwner.closeCurrent()
         }
     }
 
     SteplyScaffold(
         title = "Camera stream",
         subtitle = "Stream phone camera frames to your PC for analysis.",
-        onBack = onBack,
+        onBack = ::endPcSession,
     ) { paddingValues ->
         SteplyScreenColumn(paddingValues = paddingValues) {
             StreamingStatusCard(
                 streaming = streaming,
                 statusMessage = statusMessage,
-                sentFrames = sentFrames,
+                confirmedFrames = confirmedFrames,
                 resultSaved = resultSaved,
                 savedHistoryCount = savedHistoryCount,
             )
 
-            if (streamSource == StreamSource.DemoVideo && selectedVideoUri != null) {
-                DemoVideoPreviewCard(
-                    videoUri = selectedVideoUri,
-                    streamer = streamer,
-                    streaming = streaming,
-                    videoMessage = cameraMessage,
-                    onVideoStatus = { cameraMessage = it },
-                    onVideoError = { cameraMessage = it },
-                    onFrameSent = {
-                        if (streaming && !resultSaved) sentFrames += 1
-                    },
-                )
-            } else if (hasCameraPermission) {
+            if (hasCameraPermission) {
                 CameraPreviewCard(
                     streamer = streamer,
                     streaming = streaming,
                     cameraMessage = cameraMessage,
                     onCameraStatus = { cameraMessage = it },
                     onCameraError = { cameraMessage = it },
-                    onFrameSent = {
-                        if (streaming && !resultSaved) sentFrames += 1
-                    },
                 )
             } else {
                 CameraPermissionCard(
@@ -273,17 +385,13 @@ fun RemoteCameraScreen(
                     SteplyPrimaryButton(
                         text = "Start camera stream",
                         icon = Icons.Default.PlayArrow,
-                        onClick = { startStreaming(StreamSource.Camera) },
-                    )
-                    SteplySecondaryButton(
-                        text = "Start demo video",
-                        icon = Icons.Default.VideoLibrary,
-                        onClick = { videoPickerLauncher.launch("video/*") },
+                        onClick = ::startStreaming,
                     )
                 }
             }
 
             val currentExercisePlan = latestExercisePlan
+            val checkedMissionIds = workoutProgress?.completedExerciseIds.orEmpty().map { it.name }.toSet()
             if (currentExercisePlan != null) {
                 ResultReadyCard(
                     plan = currentExercisePlan,
@@ -298,10 +406,13 @@ fun RemoteCameraScreen(
                         plan = currentExercisePlan,
                         checkedMissionIds = checkedMissionIds,
                         onToggleMission = { missionId ->
-                            checkedMissionIds = if (missionId in checkedMissionIds) {
-                                checkedMissionIds - missionId
-                            } else {
-                                checkedMissionIds + missionId
+                            val workoutId = workoutProgress?.workoutSessionId
+                            if (workoutId != null) coroutineScope.launch {
+                                appContainer.workoutRepository.setExerciseCompleted(
+                                    workoutId,
+                                    ExerciseId.valueOf(missionId),
+                                    missionId !in checkedMissionIds,
+                                )
                             }
                         },
                     )
@@ -330,13 +441,19 @@ fun RemoteCameraScreen(
                     modifier = Modifier.weight(1f),
                 )
             }
+            SteplyDestructiveButton(
+                text = "End PC session",
+                icon = Icons.Default.Close,
+                onClick = ::endPcSession,
+            )
         }
     }
 }
 
-private enum class StreamSource {
-    Camera,
-    DemoVideo,
+private enum class LandmarkSaveOutcome {
+    STORED,
+    NOT_READY,
+    REJECTED,
 }
 
 @Composable
@@ -388,10 +505,11 @@ private fun ResultSavedCard(
 private fun StreamingStatusCard(
     streaming: Boolean,
     statusMessage: String,
-    sentFrames: Int,
+    confirmedFrames: Int,
     resultSaved: Boolean,
     savedHistoryCount: Int,
 ) {
+    val pcReceiving = confirmedFrames > 0
     SteplyCard {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -426,7 +544,11 @@ private fun StreamingStatusCard(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Text(
-                    text = if (streaming) "Streaming to PC" else "PC session linked",
+                    text = when {
+                        pcReceiving -> "PC receiving camera"
+                        streaming -> "Starting camera stream"
+                        else -> "PC session linked"
+                    },
                     style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
@@ -443,25 +565,29 @@ private fun StreamingStatusCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             StatusChip(
-                text = "PC connected",
+                text = "PC session linked",
                 color = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.primary,
             )
             StatusChip(
-                text = if (streaming) "Streaming active" else "Streaming stopped",
-                color = if (streaming) {
+                text = when {
+                    pcReceiving -> "PC receiving"
+                    streaming -> "Awaiting PC confirmation"
+                    else -> "Streaming stopped"
+                },
+                color = if (pcReceiving) {
                     MaterialTheme.colorScheme.secondaryContainer
                 } else {
                     MaterialTheme.colorScheme.surfaceVariant
                 },
-                contentColor = if (streaming) {
+                contentColor = if (pcReceiving) {
                     MaterialTheme.colorScheme.onSecondaryContainer
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
             StatusChip(
-                text = "Frames $sentFrames",
+                text = "PC confirmed $confirmedFrames",
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -496,7 +622,6 @@ private fun CameraPreviewCard(
     cameraMessage: String,
     onCameraStatus: (String) -> Unit,
     onCameraError: (String) -> Unit,
-    onFrameSent: () -> Unit,
 ) {
     SteplyCard {
         Row(
@@ -511,7 +636,7 @@ private fun CameraPreviewCard(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             StatusChip(
-                text = if (streaming) "Live" else "Ready",
+                text = if (streaming) "Capturing" else "Ready",
                 color = if (streaming) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {
@@ -528,61 +653,9 @@ private fun CameraPreviewCard(
             remoteCameraStreamer = streamer,
             onCameraStatus = onCameraStatus,
             onCameraError = onCameraError,
-            onFrameSent = onFrameSent,
         )
         Text(
             text = cameraMessage,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun DemoVideoPreviewCard(
-    videoUri: Uri?,
-    streamer: RemoteCameraStreamer?,
-    streaming: Boolean,
-    videoMessage: String,
-    onVideoStatus: (String) -> Unit,
-    onVideoError: (String) -> Unit,
-    onFrameSent: () -> Unit,
-) {
-    SteplyCard {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Demo video preview",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            StatusChip(
-                text = if (streaming) "Demo" else "Ready",
-                color = if (streaming) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-                contentColor = if (streaming) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-        }
-        GalleryVideoStreamPreview(
-            videoUri = videoUri,
-            remoteCameraStreamer = streamer,
-            onVideoStatus = onVideoStatus,
-            onVideoError = onVideoError,
-            onFrameSent = onFrameSent,
-        )
-        Text(
-            text = videoMessage,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -648,6 +721,13 @@ private fun ResultReadyCard(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
                 )
+                if (plan.professionalReviewRequired) {
+                    Text(
+                        text = "Exercise start is blocked until a professional approves this Level A plan.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
         SteplyPrimaryButton(

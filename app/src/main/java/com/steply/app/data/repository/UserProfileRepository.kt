@@ -55,9 +55,6 @@ class UserProfileRepository(
         userProfileDao.updateProfile(profile.toEntity(updatedAt = System.currentTimeMillis()))
     }
 
-    suspend fun archive(id: String, archivedAt: Long = System.currentTimeMillis()) {
-        userProfileDao.archiveProfile(id = id, archivedAt = archivedAt)
-    }
 }
 
 private fun UserProfileEntity.toDomain(): UserProfile {

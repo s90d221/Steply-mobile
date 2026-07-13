@@ -8,16 +8,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -29,32 +25,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.steply.app.domain.model.MovementHistory
-import com.steply.app.report.WeeklyReportFormatter
-import com.steply.app.report.WeeklyReportGenerator
-import com.steply.app.report.WeeklyReportStore
-import com.steply.app.report.WeeklyReportWorkScheduler
+import com.steply.app.domain.model.AssessmentSummary
+import com.steply.app.domain.model.BalanceStage
+import com.steply.app.domain.steadi.SteadiScorer
 import com.steply.app.ui.screens.components.EmptyStateCard
-import com.steply.app.ui.screens.components.StatusChip
-import com.steply.app.ui.screens.components.StatusPill
 import com.steply.app.ui.screens.components.SteplyCard
 import com.steply.app.ui.screens.components.SteplyScaffold
 import com.steply.app.ui.screens.components.SteplyScreenColumn
 import com.steply.app.ui.screens.components.SteplySecondaryButton
-import com.steply.app.ui.screens.components.SteplySpacing
-import com.steply.app.util.formatDisplayDateTime
 import java.util.Locale
 
 @Composable
 fun HistoryScreen(
     uiState: HistoryUiState,
     onBack: () -> Unit,
+    onPrepareWeeklyReport: ((String) -> Unit, () -> Unit) -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var pendingReportText by remember { mutableStateOf<String?>(null) }
@@ -81,42 +70,27 @@ fun HistoryScreen(
         onBack = onBack,
     ) { paddingValues ->
         SteplyScreenColumn(paddingValues = paddingValues) {
-            if (uiState.items.isEmpty()) {
+            if (uiState.summaries.isEmpty()) {
                 EmptyStateCard(
                     title = "No history saved yet",
                     message = "Complete a PC analysis to see saved movement results and recommendations here.",
                     icon = Icons.Default.Refresh,
                 )
             } else {
-                val groupedItems = uiState.items.asReversed().groupBy { it.historyTestCategory() }
-
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     WeeklyReportShareCard(
-                        items = uiState.items,
                         selectedProfileId = uiState.selectedUserId,
                         statusMessage = reportShareMessage,
-                        onPrepareReport = { reportText ->
-                            WeeklyReportWorkScheduler.triggerNow(context)
-                            WeeklyReportStore.save(context, reportText, System.currentTimeMillis())
-                            pendingReportText = reportText
+                        onPrepareReport = {
+                            onPrepareWeeklyReport(
+                                { reportText ->
+                                    pendingReportText = reportText
+                                },
+                                { reportShareMessage = "A strict weekly snapshot could not be prepared." },
+                            )
                         },
                     )
-                    HistoryOverviewTrends(
-                        balanceItems = groupedItems[HistoryTestCategory.BALANCE].orEmpty(),
-                        chairStandItems = groupedItems[HistoryTestCategory.CHAIR_STAND].orEmpty(),
-                    )
-                    HistoryTestSection(
-                        title = "4-Stage Balance",
-                        items = groupedItems[HistoryTestCategory.BALANCE].orEmpty(),
-                    )
-                    HistoryTestSection(
-                        title = "30 sec Chair Stand",
-                        items = groupedItems[HistoryTestCategory.CHAIR_STAND].orEmpty(),
-                    )
-                    HistoryTestSection(
-                        title = "Other",
-                        items = groupedItems[HistoryTestCategory.OTHER].orEmpty(),
-                    )
+                    CanonicalHistoryOverviewTrends(uiState.summaries, uiState.chairStandCutoff)
                 }
             }
         }
@@ -124,19 +98,103 @@ fun HistoryScreen(
 }
 
 @Composable
+private fun CanonicalHistoryOverviewTrends(
+    summaries: List<AssessmentSummary>,
+    chairStandCutoff: Int?,
+) {
+    if (summaries.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = "Trend overview",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        CanonicalTrendCard(
+            title = "30 sec Chair Stand",
+            subtitle = "Valid complete stands · last 5",
+            values = summaries.sortedBy { it.completedAt }.takeLast(5).map { it.chairStandRepetitions.toDouble() },
+            baseline = chairStandCutoff?.toDouble(),
+            baselineLabel = chairStandCutoff?.let { "CDC age/sex reference: $it" },
+        )
+        canonicalBalanceSeries(summaries).forEach { series ->
+            val tandem = series.stage == BalanceStage.TANDEM
+            CanonicalTrendCard(
+                title = "4-Stage Balance · ${series.stage.name.replace('_', ' ')}",
+                subtitle = "Hold seconds · last 5",
+                values = series.values,
+                baseline = SteadiScorer.TANDEM_CUTOFF_SECONDS,
+                baselineLabel = "10-second posture reference",
+                emphasized = tandem,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CanonicalTrendCard(
+    title: String,
+    subtitle: String,
+    values: List<Double>,
+    baseline: Double?,
+    baselineLabel: String?,
+    emphasized: Boolean = false,
+) {
+    if (values.isEmpty()) return
+    val delta = values.last() - values.first()
+    val color = when {
+        delta > 0 -> Color(0xFF13A88E)
+        delta < 0 -> Color(0xFFBA1A1A)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    SteplyCard(
+        containerColor = if (emphasized) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+    ) {
+        Text(text = title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(text = subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        CanonicalSparklineChart(values, color, baseline)
+        baselineLabel?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Text(
+            text = "${values.joinToString(" → ") { String.format(Locale.US, "%.1f", it) }} · change ${if (delta > 0) "+" else ""}${String.format(Locale.US, "%.1f", delta)}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = color,
+        )
+    }
+}
+
+@Composable
+private fun CanonicalSparklineChart(values: List<Double>, color: Color, baseline: Double?) {
+    val outlineColor = MaterialTheme.colorScheme.outline
+    Canvas(modifier = Modifier.fillMaxWidth().height(120.dp)) {
+        val scaleValues = if (baseline == null) values else values + baseline
+        val min = scaleValues.minOrNull() ?: 0.0
+        val max = scaleValues.maxOrNull() ?: 1.0
+        val range = (max - min).coerceAtLeast(0.1)
+        fun y(value: Double) = size.height - (((value - min) / range).toFloat() * size.height)
+        val step = if (values.size > 1) size.width / (values.size - 1) else 0f
+        fun x(index: Int) = if (values.size == 1) size.width / 2f else step * index
+        baseline?.let {
+            drawLine(
+                color = outlineColor,
+                start = Offset(0f, y(it)),
+                end = Offset(size.width, y(it)),
+                strokeWidth = 3f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f)),
+            )
+        }
+        values.zipWithNext().forEachIndexed { index, pair ->
+            drawLine(color, Offset(x(index), y(pair.first)), Offset(x(index + 1), y(pair.second)), 8f, StrokeCap.Round)
+        }
+        values.forEachIndexed { index, value -> drawCircle(color, 8f, Offset(x(index), y(value))) }
+    }
+}
+
+@Composable
 private fun WeeklyReportShareCard(
-    items: List<MovementHistory>,
     selectedProfileId: String?,
     statusMessage: String?,
-    onPrepareReport: (String) -> Unit,
+    onPrepareReport: () -> Unit,
 ) {
-    val reportText = remember(items, selectedProfileId) {
-        WeeklyReportGenerator.generate(
-            items = items,
-            selectedProfileId = selectedProfileId,
-        )?.let(WeeklyReportFormatter::format)
-    }
-
     SteplyCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
@@ -157,8 +215,8 @@ private fun WeeklyReportShareCard(
             SteplySecondaryButton(
                 text = "Review and share weekly report",
                 icon = Icons.Default.Share,
-                onClick = { reportText?.let(onPrepareReport) },
-                enabled = reportText != null,
+                onClick = onPrepareReport,
+                enabled = selectedProfileId != null,
             )
             statusMessage?.let {
                 Text(
@@ -222,586 +280,4 @@ private fun shareWeeklyReport(
     } catch (_: ActivityNotFoundException) {
         false
     }
-}
-
-@Composable
-private fun HistoryOverviewTrends(
-    balanceItems: List<MovementHistory>,
-    chairStandItems: List<MovementHistory>,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = "Trend overview",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        HistoryTrendCard(category = HistoryTestCategory.BALANCE, items = balanceItems)
-        HistoryTrendCard(category = HistoryTestCategory.CHAIR_STAND, items = chairStandItems)
-    }
-}
-
-@Composable
-private fun HistoryTestSection(
-    title: String,
-    items: List<MovementHistory>,
-) {
-    if (items.isEmpty()) return
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        items.forEach { item ->
-            HistoryItemCard(item = item)
-        }
-    }
-}
-
-@Composable
-private fun HistoryTrendCard(
-    category: HistoryTestCategory,
-    items: List<MovementHistory>,
-) {
-    val trendPoints = items.mapNotNull { item ->
-        item.trendMetricValue(category)?.let { value ->
-            HistoryTrendPoint(
-                label = item.testType?.toDisplayLabel() ?: formatDisplayDateTime(item.receivedAt),
-                value = value,
-            )
-        }
-    }.takeLast(5)
-
-    if (trendPoints.size < 2) return
-
-    val firstValue = trendPoints.first().value
-    val latestValue = trendPoints.last().value
-    val delta = latestValue - firstValue
-    val isImproving = delta > 0
-    val isWorsening = delta < 0
-    val trendColor = when {
-        isImproving -> Color(0xFF13A88E)
-        isWorsening -> Color(0xFFBA1A1A)
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    val comparison = items.trendComparison(category)
-
-    SteplyCard {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = category.displayName(),
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Text(
-                        text = category.trendTitle(),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = "Last 5 results",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                TrendBadge(
-                    text = when {
-                        isImproving -> "+$delta"
-                        isWorsening -> delta.toString()
-                        else -> "No change"
-                    },
-                    color = trendColor,
-                )
-            }
-
-            SparklineChart(
-                points = trendPoints,
-                lineColor = trendColor,
-                positiveByIncrease = category.isPositiveDisplayDirectionByIncrease(),
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                TrendStat(label = "First", value = firstValue.toString())
-                TrendStat(label = "Latest", value = latestValue.toString())
-                TrendStat(label = "Change", value = if (delta > 0) "+$delta" else delta.toString())
-            }
-
-            comparison?.let {
-                TrendComparisonBanner(
-                    category = category,
-                    comparison = it,
-                )
-            } ?: TrendComparisonFallbackBanner(category = category)
-        }
-    }
-}
-
-@Composable
-private fun SparklineChart(
-    points: List<HistoryTrendPoint>,
-    lineColor: Color,
-    positiveByIncrease: Boolean,
-) {
-    val values = points.map { it.value }
-    val minValue = values.minOrNull() ?: 0
-    val maxValue = values.maxOrNull() ?: 0
-    val range = (maxValue - minValue).coerceAtLeast(1)
-
-    Canvas(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(120.dp),
-    ) {
-        val chartWidth = size.width
-        val chartHeight = size.height
-        val stepX = if (points.size > 1) chartWidth / (points.size - 1) else 0f
-
-        points.zipWithNext().forEachIndexed { index, pair ->
-            val previousPoint = pair.first
-            val currentPoint = pair.second
-            val startX = stepX * index
-            val endX = stepX * (index + 1)
-            val startY = chartHeight - ((previousPoint.value - minValue).toFloat() / range.toFloat() * chartHeight)
-            val endY = chartHeight - ((currentPoint.value - minValue).toFloat() / range.toFloat() * chartHeight)
-            val segmentColor = when {
-                currentPoint.value > previousPoint.value && positiveByIncrease -> Color(0xFF13A88E)
-                currentPoint.value < previousPoint.value && positiveByIncrease -> Color(0xFFBA1A1A)
-                else -> lineColor
-            }
-
-            drawLine(
-                color = segmentColor,
-                start = Offset(startX, startY),
-                end = Offset(endX, endY),
-                strokeWidth = 8f,
-                cap = StrokeCap.Round,
-            )
-        }
-
-        points.forEachIndexed { index, point ->
-            val x = stepX * index
-            val y = chartHeight - ((point.value - minValue).toFloat() / range.toFloat() * chartHeight)
-            drawCircle(
-                color = lineColor,
-                radius = 9f,
-                center = Offset(x, y),
-            )
-            drawCircle(
-                color = Color.White,
-                radius = 3f,
-                center = Offset(x, y),
-            )
-        }
-    }
-}
-
-@Composable
-private fun TrendBadge(
-    text: String,
-    color: Color,
-) {
-    Surface(
-        shape = MaterialTheme.shapes.small,
-        color = color.copy(alpha = 0.14f),
-        contentColor = color,
-    ) {
-        Text(
-            text = text,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = color,
-        )
-    }
-}
-
-@Composable
-private fun TrendStat(
-    label: String,
-    value: String,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-    }
-}
-
-private data class HistoryTrendPoint(
-    val label: String,
-    val value: Int,
-)
-
-private enum class HistoryTestCategory {
-    BALANCE,
-    CHAIR_STAND,
-    OTHER,
-}
-
-private fun MovementHistory.historyTestCategory(): HistoryTestCategory {
-    val normalized = testType
-        ?.lowercase()
-        ?.replace("_", " ")
-        ?.trim()
-        .orEmpty()
-
-    return when {
-        // 30-second chair stand (checked first so "chair stand" never falls through to balance).
-        normalized.contains("chair") -> HistoryTestCategory.CHAIR_STAND
-        normalized.contains("stand up") -> HistoryTestCategory.CHAIR_STAND
-        // 4-stage balance (PC test type "four_stage_balance", plus legacy standing/posture/balance names).
-        normalized.contains("four stage") -> HistoryTestCategory.BALANCE
-        normalized.contains("balance") -> HistoryTestCategory.BALANCE
-        normalized.contains("standing") -> HistoryTestCategory.BALANCE
-        normalized.contains("posture") -> HistoryTestCategory.BALANCE
-        else -> HistoryTestCategory.OTHER
-    }
-}
-
-private fun MovementHistory.trendMetricValue(category: HistoryTestCategory): Int? {
-    // Presentation-only metric selection from PC final result fields already stored on the phone.
-    // Do not parse rawJson/landmarks here or derive STEADI risk, weakness, or recommendations;
-    // those remain the PC web analysis responsibility.
-    return when (category) {
-        HistoryTestCategory.CHAIR_STAND -> repetitionCount ?: score
-        HistoryTestCategory.BALANCE -> score ?: durationSeconds
-        HistoryTestCategory.OTHER -> score ?: repetitionCount ?: durationSeconds
-    }
-}
-
-private fun HistoryTestCategory.isPositiveDisplayDirectionByIncrease(): Boolean {
-    return true
-}
-
-private fun HistoryTestCategory.trendTitle(): String {
-    return when (this) {
-        HistoryTestCategory.BALANCE -> "Recent hold-time trend"
-        HistoryTestCategory.CHAIR_STAND -> "Recent repetition trend"
-        HistoryTestCategory.OTHER -> "Recent trend"
-    }
-}
-
-private fun HistoryTestCategory.displayName(): String {
-    return when (this) {
-        HistoryTestCategory.BALANCE -> "4-Stage Balance"
-        HistoryTestCategory.CHAIR_STAND -> "30 sec Chair Stand"
-        HistoryTestCategory.OTHER -> "Other"
-    }
-}
-
-@Composable
-private fun TrendComparisonBanner(
-    category: HistoryTestCategory,
-    comparison: TrendComparison,
-) {
-    val color = when {
-        comparison.delta > 0 -> Color(0xFF13A88E)
-        comparison.delta < 0 -> Color(0xFFBA1A1A)
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    val comparisonText = when {
-        comparison.delta > 0 -> "The last 3 days average higher than the 3 days before."
-        comparison.delta < 0 -> "The last 3 days average lower than the 3 days before."
-        else -> "The last 3 days average the same as the 3 days before."
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.small,
-        color = color.copy(alpha = 0.12f),
-        contentColor = color,
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = "${category.displayName()} · 3-day average",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = color,
-            )
-            Text(
-                text = comparisonText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = color,
-            )
-            Text(
-                text = "Last 3 days ${comparison.recentAverageText()} · Previous 3 days ${comparison.previousAverageText()}",
-                style = MaterialTheme.typography.bodySmall,
-                color = color,
-            )
-            Text(
-                text = DisplayTrendNotice,
-                style = MaterialTheme.typography.bodySmall,
-                color = color,
-            )
-        }
-    }
-}
-
-@Composable
-private fun TrendComparisonFallbackBanner(category: HistoryTestCategory) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = "${category.displayName()} · average comparison",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "Not enough results to compare yet.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-private data class TrendComparison(
-    val recentAverage: Double,
-    val previousAverage: Double,
-    val delta: Double,
-)
-
-private data class TrendSample(
-    val value: Int,
-    val receivedAt: Long,
-)
-
-private fun List<MovementHistory>.trendComparison(category: HistoryTestCategory): TrendComparison? {
-    // Display-only arithmetic trend over PC-provided final score/count/duration values.
-    // This is not a clinical risk decision and must not re-analyze raw pose data.
-    val samples = mapNotNull { item ->
-        item.trendMetricValue(category)?.let { value ->
-            TrendSample(
-                value = value,
-                receivedAt = item.receivedAt,
-            )
-        }
-    }.sortedBy { it.receivedAt }
-
-    if (samples.size < 2) return null
-
-    val comparisonByTime = compareByThreeDayWindows(samples)
-    if (comparisonByTime != null) return comparisonByTime
-
-    val recentSamples = samples.takeLast(3)
-    val previousSamples = samples.dropLast(3).takeLast(3)
-    if (previousSamples.isEmpty()) return null
-
-    val recentAverage = recentSamples.map { it.value.toDouble() }.average()
-    val previousAverage = previousSamples.map { it.value.toDouble() }.average()
-
-    return TrendComparison(
-        recentAverage = recentAverage,
-        previousAverage = previousAverage,
-        delta = recentAverage - previousAverage,
-    )
-}
-
-private fun compareByThreeDayWindows(samples: List<TrendSample>): TrendComparison? {
-    val latestReceivedAt = samples.maxOf { it.receivedAt }
-    val threeDaysMillis = 3L * 24L * 60L * 60L * 1000L
-    val recentStart = latestReceivedAt - threeDaysMillis
-    val previousStart = latestReceivedAt - threeDaysMillis * 2L
-
-    val recentValues = samples
-        .filter { it.receivedAt >= recentStart }
-        .map { it.value.toDouble() }
-    val previousValues = samples
-        .filter { it.receivedAt >= previousStart && it.receivedAt < recentStart }
-        .map { it.value.toDouble() }
-
-    if (recentValues.isEmpty() || previousValues.isEmpty()) return null
-
-    return TrendComparison(
-        recentAverage = recentValues.average(),
-        previousAverage = previousValues.average(),
-        delta = recentValues.average() - previousValues.average(),
-    )
-}
-
-private fun TrendComparison.recentAverageText(): String {
-    return String.format(Locale.US, "%.1f", recentAverage)
-}
-
-private fun TrendComparison.previousAverageText(): String {
-    return String.format(Locale.US, "%.1f", previousAverage)
-}
-
-private const val DisplayTrendNotice = "For reference only — a simple trend, not a clinical assessment."
-
-@Composable
-private fun HistoryItemCard(item: MovementHistory) {
-    SteplyCard {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    text = item.profileName ?: "Profile ${item.profileId}",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = formatDisplayDateTime(item.receivedAt),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            item.recommendationLevel?.let {
-                StatusPill(recommendationLevel = it)
-            } ?: StatusChip(
-                text = "Saved",
-                color = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.primary,
-            )
-        }
-
-        item.message?.takeIf { it.isNotBlank() }?.let { message ->
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-        } ?: Text(
-            text = "Movement check result saved.",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            HistoryMetricTile(label = "Score", value = item.score?.toString() ?: "-")
-            HistoryMetricTile(label = "Test", value = item.testType?.toDisplayLabel() ?: "Movement check")
-            HistoryMetricTile(label = keyMetricLabel(item), value = keyMetricValue(item))
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            StatusChip(
-                text = item.sessionId?.let { "Session linked" } ?: "Local result",
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            item.durationSeconds?.let { seconds ->
-                StatusChip(
-                    text = "${seconds}s",
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
-            }
-        }
-
-        item.flagsText?.takeIf { it.isNotBlank() }?.let { flags ->
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.small,
-                color = MaterialTheme.colorScheme.tertiaryContainer,
-                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-            ) {
-                Text(
-                    text = flags,
-                    modifier = Modifier.padding(SteplySpacing.NoticePadding),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun RowScope.HistoryMetricTile(label: String, value: String) {
-    Surface(
-        modifier = Modifier.weight(1f),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = value,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
-            )
-        }
-    }
-}
-
-private fun keyMetricLabel(item: MovementHistory): String {
-    return when {
-        item.repetitionCount != null -> "Reps"
-        item.durationSeconds != null -> "Duration"
-        else -> "Metric"
-    }
-}
-
-private fun keyMetricValue(item: MovementHistory): String {
-    return when {
-        item.repetitionCount != null -> item.repetitionCount.toString()
-        item.durationSeconds != null -> "${item.durationSeconds}s"
-        else -> "-"
-    }
-}
-
-private fun String.toDisplayLabel(): String {
-    val trimmed = trim()
-    if ('_' !in trimmed && trimmed.any { it.isLowerCase() }) return trimmed
-
-    return trimmed
-        .replace('_', ' ')
-        .lowercase()
-        .replaceFirstChar { char -> char.titlecase() }
 }

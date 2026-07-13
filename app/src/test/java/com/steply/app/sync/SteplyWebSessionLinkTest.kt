@@ -5,8 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 
 class SteplyWebSessionLinkTest {
     @After
@@ -15,8 +13,8 @@ class SteplyWebSessionLinkTest {
     }
 
     @Test
-    fun `secure qr payload builds wss websocket url`() {
-        val payload = SteplyWebSessionLink.parse(validPayload(), nowEpochMs = NOW)
+    fun `strict JSON qr payload builds wss websocket url`() {
+        val payload = SteplyWebSessionLink.parse(validJsonPayload(serverUrl = "https://192.168.0.12:3000"), nowEpochMs = NOW)
 
         assertNotNull(payload)
         requireNotNull(payload)
@@ -34,7 +32,11 @@ class SteplyWebSessionLinkTest {
         assertEquals("session-123", payload.sessionId)
         assertEquals("https://10.189.36.119:3000", payload.serverUrl)
         assertEquals(
-            listOf("https://10.189.36.119:3000", "https://192.168.0.12:3000"),
+            listOf(
+                "https://10.189.36.119:3000",
+                "https://192.168.0.99:3000",
+                "https://192.168.0.12:3000",
+            ),
             payload.candidateServerUrls,
         )
         assertEquals("wss://10.189.36.119:3000/ws?sessionId=session-123&role=mobile", payload.webSocketUrl)
@@ -44,7 +46,7 @@ class SteplyWebSessionLinkTest {
     @Test
     fun `cleartext server url is rejected`() {
         val payload = SteplyWebSessionLink.parse(
-            validPayload(serverUrl = "http://192.168.0.12:3000"),
+            validJsonPayload(serverUrl = "http://192.168.0.12:3000"),
             nowEpochMs = NOW,
         )
 
@@ -54,7 +56,7 @@ class SteplyWebSessionLinkTest {
     @Test
     fun `expired qr payload is rejected`() {
         val payload = SteplyWebSessionLink.parse(
-            validPayload(expiresAtEpochMs = NOW - 1_000L),
+            validJsonPayload(expiresAtEpochMs = NOW - 1_000L),
             nowEpochMs = NOW,
         )
 
@@ -64,7 +66,7 @@ class SteplyWebSessionLinkTest {
     @Test
     fun `missing one time pairing token is rejected`() {
         val payload = SteplyWebSessionLink.parse(
-            validPayload(pairingToken = ""),
+            validJsonPayload(pairingToken = ""),
             nowEpochMs = NOW,
         )
 
@@ -74,7 +76,7 @@ class SteplyWebSessionLinkTest {
     @Test
     fun `invalid tls certificate pin is rejected`() {
         val payload = SteplyWebSessionLink.parse(
-            validPayload(tlsCertSha256 = "not-a-sha256"),
+            validJsonPayload(tlsCertSha256 = "not-a-sha256"),
             nowEpochMs = NOW,
         )
 
@@ -83,26 +85,28 @@ class SteplyWebSessionLinkTest {
 
     @Test
     fun `consumed pairing token is rejected`() {
-        val payload = SteplyWebSessionLink.parse(validPayload(), nowEpochMs = NOW)
+        val payload = SteplyWebSessionLink.parse(validJsonPayload(), nowEpochMs = NOW)
         requireNotNull(payload)
 
         SteplyWebSessionLink.markConsumed(payload)
 
-        assertNull(SteplyWebSessionLink.parse(validPayload(), nowEpochMs = NOW))
+        assertNull(SteplyWebSessionLink.parse(validJsonPayload(), nowEpochMs = NOW))
     }
 
-    private fun validPayload(
-        serverUrl: String = "https://192.168.0.12:3000",
-        expiresAtEpochMs: Long = NOW + 60_000L,
-        pairingToken: String = "0123456789abcdef",
-        tlsCertSha256: String = TEST_CERT_SHA256,
-    ): String {
-        return "steply://web-session" +
-            "?sessionId=${"session-123".urlEncode()}" +
-            "&serverUrl=${serverUrl.urlEncode()}" +
-            "&expiresAtEpochMs=$expiresAtEpochMs" +
-            "&pairingToken=${pairingToken.urlEncode()}" +
-            "&tlsCertSha256=${tlsCertSha256.urlEncode()}"
+    @Test
+    fun `URL query qr and unknown JSON fields are rejected`() {
+        assertNull(
+            SteplyWebSessionLink.parse(
+                "steply://web-session?sessionId=session-123&serverUrl=https%3A%2F%2F192.168.0.12%3A3000",
+                nowEpochMs = NOW,
+            ),
+        )
+        assertNull(
+            SteplyWebSessionLink.parse(
+                validJsonPayload().replace("\"type\":", "\"unexpected\": true, \"type\":"),
+                nowEpochMs = NOW,
+            ),
+        )
     }
 
     private fun validJsonPayload(
@@ -114,23 +118,22 @@ class SteplyWebSessionLinkTest {
         return """
             {
               "type": "steply-web-session",
-              "version": 2,
+              "version": 3,
+              "connectionSessionId": "session-123",
               "sessionId": "session-123",
+              "assessmentSessionSchemaVersion": "assessment_session.v2",
               "serverUrl": "$serverUrl",
               "serverUrls": [
                 "$serverUrl",
-                "http://192.168.0.99:3000",
+                "https://192.168.0.99:3000",
                 "https://192.168.0.12:3000"
               ],
+              "expiresAt": "${java.time.Instant.ofEpochMilli(expiresAtEpochMs)}",
               "expiresAtEpochMs": $expiresAtEpochMs,
               "pairingToken": "$pairingToken",
               "tlsCertSha256": "$tlsCertSha256"
             }
         """.trimIndent()
-    }
-
-    private fun String.urlEncode(): String {
-        return URLEncoder.encode(this, StandardCharsets.UTF_8.name()).replace("+", "%20")
     }
 
     private companion object {

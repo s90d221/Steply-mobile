@@ -43,14 +43,12 @@ fun CameraStreamPreview(
     remoteCameraStreamer: RemoteCameraStreamer?,
     onCameraStatus: (String) -> Unit,
     onCameraError: (String) -> Unit,
-    onFrameSent: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val currentOnStatus by rememberUpdatedState(onCameraStatus)
     val currentOnError by rememberUpdatedState(onCameraError)
-    val currentOnFrameSent by rememberUpdatedState(onFrameSent)
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val previewView = remember(context) {
         PreviewView(context).apply {
@@ -121,9 +119,7 @@ fun CameraStreamPreview(
                                 val jpegBytes = imageProxy.toRotatedJpegBytes(useFrontCamera = useFrontCamera)
                                 val activeStreamer = remoteCameraStreamer
                                 val sent = activeStreamer?.sendJpeg(jpegBytes, capturedAtMs = capturedAtMs) == true
-                                if (sent) {
-                                    mainHandler.post { currentOnFrameSent() }
-                                } else if (activeStreamer != null && now - lastSendFailureReportedAt >= SEND_FAILURE_REPORT_INTERVAL_MS) {
+                                if (!sent && activeStreamer != null && now - lastSendFailureReportedAt >= SEND_FAILURE_REPORT_INTERVAL_MS) {
                                     lastSendFailureReportedAt = now
                                     mainHandler.post {
                                         currentOnError("Frame captured, but the PC connection is not ready yet.")
@@ -207,5 +203,7 @@ private fun ImageProxy.toRotatedJpegBytes(
     }
 }
 
-private const val REMOTE_CAMERA_FRAME_INTERVAL_MS = 100L
+// §6.4: nominal 30 fps input cadence. KEEP_ONLY_LATEST drops work under pressure
+// instead of queuing stale frames, so measurement time remains capture-driven.
+internal const val REMOTE_CAMERA_FRAME_INTERVAL_MS = 33L
 private const val SEND_FAILURE_REPORT_INTERVAL_MS = 1_000L

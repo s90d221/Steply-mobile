@@ -25,12 +25,7 @@ interface UserProfileDao {
     @Update
     suspend fun updateProfile(profile: UserProfileEntity)
 
-    @Query("UPDATE user_profiles SET archivedAt = :archivedAt, updatedAt = :archivedAt WHERE id = :id")
-    suspend fun archiveProfile(id: String, archivedAt: Long)
-
     @Query("DELETE FROM user_profiles WHERE id = :id")
     suspend fun deleteProfile(id: String)
 
-    @Query("DELETE FROM user_profiles")
-    suspend fun deleteAllProfiles()
 }

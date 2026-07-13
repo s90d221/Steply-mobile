@@ -46,13 +46,13 @@ fun ProfileListScreen(
             onDismissRequest = onDismissArchive,
             title = {
                 Text(
-                    text = "Hide this profile?",
+                    text = "Delete this profile?",
                     style = MaterialTheme.typography.titleLarge,
                 )
             },
             text = {
                 Text(
-                    text = "This removes the profile from the chooser. Saved history stays on this phone.",
+                    text = "This permanently deletes this profile, its assessments, workouts, care history, landmarks, reports, and scheduled actions from this phone. Other profiles are not changed.",
                     style = MaterialTheme.typography.bodyLarge,
                 )
             },
@@ -61,7 +61,7 @@ fun ProfileListScreen(
                     onClick = onConfirmArchive,
                     enabled = !uiState.isWorking,
                 ) {
-                    Text("Hide profile")
+                    Text("Delete profile")
                 }
             },
             dismissButton = {
@@ -193,7 +193,7 @@ private fun ProfileListItem(
                 modifier = Modifier.weight(1f),
             )
             SteplySecondaryButton(
-                text = "Hide",
+                text = "Delete",
                 icon = Icons.Default.Person,
                 onClick = onArchive,
                 modifier = Modifier.weight(1f),

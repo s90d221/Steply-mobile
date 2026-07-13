@@ -1,7 +1,7 @@
 package com.steply.app
 
 import android.app.Application
-import com.steply.app.report.WeeklyReportWorkScheduler
+import com.steply.app.care.android.CareAgentCycleScheduler
 
 class SteplyApplication : Application() {
     lateinit var container: AppContainer
@@ -10,6 +10,6 @@ class SteplyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
-        WeeklyReportWorkScheduler.schedule(this)
+        CareAgentCycleScheduler.schedule(this)
     }
 }

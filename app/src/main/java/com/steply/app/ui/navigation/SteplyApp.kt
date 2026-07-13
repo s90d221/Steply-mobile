@@ -36,14 +36,17 @@ import kotlinx.coroutines.flow.first
 fun SteplyApp(
     appContainer: AppContainer,
     navController: NavHostController = rememberNavController(),
-    pendingRemoteCameraLink: String? = null,
-    onRemoteCameraLinkHandled: () -> Unit = {},
 ) {
     var startRoute by remember(appContainer) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(appContainer) {
         val selectedUserId = appContainer.settingsRepository.selectedUserId.first()
-        startRoute = if (selectedUserId == null) Routes.ProfileList else Routes.RemoteConnect
+        val activeAssessment = appContainer.assessmentSessionRepository.getActive()
+        startRoute = when {
+            selectedUserId == null -> Routes.ProfileList
+            activeAssessment?.envelope?.session?.profileId == selectedUserId -> Routes.RemoteCamera
+            else -> Routes.RemoteConnect
+        }
     }
 
     val resolvedStartRoute = startRoute
@@ -119,9 +122,9 @@ fun SteplyApp(
             )
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-            LaunchedEffect(uiState.linkedSession) {
-                val session = uiState.linkedSession ?: return@LaunchedEffect
-                navController.navigate(Routes.remoteCamera(session)) {
+            LaunchedEffect(uiState.openPersistedAssessment) {
+                if (!uiState.openPersistedAssessment) return@LaunchedEffect
+                navController.navigate(Routes.remoteCamera()) {
                     launchSingleTop = true
                 }
                 viewModel.onLinkedSessionNavigationHandled()
@@ -129,14 +132,13 @@ fun SteplyApp(
 
             RemoteConnectScreen(
                 uiState = uiState,
-                pendingRemoteCameraLink = pendingRemoteCameraLink,
-                onPendingRemoteCameraLinkHandled = onRemoteCameraLinkHandled,
                 onQrScanned = viewModel::connectFromQr,
                 onManualQrChanged = viewModel::onManualQrChanged,
                 onConnectManual = viewModel::connectManual,
                 onChangeProfile = { navController.navigate(Routes.ProfileList) },
                 onAddProfile = { navController.navigate(Routes.addProfile()) },
                 onViewHistory = { navController.navigate(Routes.History) },
+                onToggleMission = viewModel::toggleMission,
             )
         }
 
@@ -149,42 +151,13 @@ fun SteplyApp(
             HistoryScreen(
                 uiState = uiState,
                 onBack = { navController.popBackStack() },
+                onPrepareWeeklyReport = viewModel::prepareWeeklyReport,
             )
         }
 
-        composable(
-            route = Routes.RemoteCamera,
-            arguments = listOf(
-                navArgument("sessionId") { type = NavType.StringType },
-                navArgument("serverUrl") { type = NavType.StringType },
-                navArgument("pairingToken") {
-                    type = NavType.StringType
-                    defaultValue = ""
-                },
-                navArgument("expiresAtEpochMs") {
-                    type = NavType.LongType
-                    defaultValue = Long.MAX_VALUE
-                },
-                navArgument("tlsCertSha256") {
-                    type = NavType.StringType
-                    defaultValue = ""
-                },
-            ),
-        ) { entry ->
-            val sessionId = entry.arguments?.getString("sessionId").orEmpty()
-            val serverUrl = entry.arguments?.getString("serverUrl").orEmpty()
-            val pairingToken = entry.arguments?.getString("pairingToken").orEmpty()
-            val expiresAtEpochMs = entry.arguments?.getLong("expiresAtEpochMs") ?: Long.MAX_VALUE
-            val tlsCertSha256 = entry.arguments
-                ?.getString("tlsCertSha256")
-                ?.takeIf { it.isNotBlank() }
+        composable(Routes.RemoteCamera) {
             RemoteCameraScreen(
                 appContainer = appContainer,
-                sessionId = sessionId,
-                serverUrl = serverUrl,
-                pairingToken = pairingToken,
-                expiresAtEpochMs = expiresAtEpochMs,
-                tlsCertSha256 = tlsCertSha256,
                 onBack = { navController.popBackStack() },
                 onChangeProfile = { navController.navigate(Routes.ProfileList) },
                 onViewHistory = { navController.navigate(Routes.History) },

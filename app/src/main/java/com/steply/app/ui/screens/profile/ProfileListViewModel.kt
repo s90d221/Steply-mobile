@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -76,10 +75,7 @@ class ProfileListViewModel(
         viewModelScope.launch {
             actionState.update { it.copy(isWorking = true, errorMessage = null) }
             runCatching {
-                appContainer.userProfileRepository.archive(target.id)
-                if (appContainer.settingsRepository.selectedUserId.first() == target.id) {
-                    appContainer.settingsRepository.clearSelectedUserId()
-                }
+                appContainer.profileDeletionCoordinator.deleteProfile(target.id)
             }.onSuccess {
                 actionState.value = ProfileListActionState()
             }.onFailure {

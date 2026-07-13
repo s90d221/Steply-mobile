@@ -1,6 +1,6 @@
 package com.steply.app.sync
 
-import com.steply.app.domain.model.UserProfile
+import com.steply.app.domain.model.AssessmentSession
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -32,20 +32,23 @@ interface PcSessionCleanupRequester {
 
 class SteplyWebClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(4, TimeUnit.SECONDS)
-        .writeTimeout(4, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build(),
 ) : PcSessionCleanupRequester {
     fun connectProfile(
         session: SteplyWebSessionPayload,
-        profile: UserProfile,
+        assessmentSession: AssessmentSession? = null,
+        dataContract: SteplyDataContract,
         callback: ResultCallback = ResultCallback.Noop,
     ) {
         val candidates = session.candidateServerUrls.ifEmpty { listOf(session.serverUrl) }.distinct()
         tryConnectProfile(
             session = session,
-            profile = profile,
+            assessmentSession = assessmentSession,
+            dataContract = dataContract,
             candidates = candidates,
             index = 0,
             errors = mutableListOf(),
@@ -85,6 +88,7 @@ class SteplyWebClient(
         val baseUrl = SteplyWebSessionPayload.normalizeUrl(candidates[index])
         val activeSession = session.withServerUrl(baseUrl)
         val body = JSONObject()
+            .put("connectionSessionId", activeSession.sessionId)
             .put("sessionId", activeSession.sessionId)
             .put("pairingToken", activeSession.pairingToken)
             .put("reason", reason)
@@ -110,7 +114,8 @@ class SteplyWebClient(
 
     private fun tryConnectProfile(
         session: SteplyWebSessionPayload,
-        profile: UserProfile,
+        assessmentSession: AssessmentSession?,
+        dataContract: SteplyDataContract,
         candidates: List<String>,
         index: Int,
         errors: MutableList<String>,
@@ -123,10 +128,7 @@ class SteplyWebClient(
 
         val baseUrl = SteplyWebSessionPayload.normalizeUrl(candidates[index])
         val activeSession = session.withServerUrl(baseUrl)
-        val body = JSONObject()
-            .put("sessionId", activeSession.sessionId)
-            .put("pairingToken", activeSession.pairingToken)
-            .put("profile", profile.toJson())
+        val body = buildConnectRequestBody(activeSession, assessmentSession, dataContract)
 
         postJson(
             session = activeSession,
@@ -137,7 +139,8 @@ class SteplyWebClient(
                 errors += "$baseUrl -> $message"
                 tryConnectProfile(
                     session = session,
-                    profile = profile,
+                    assessmentSession = assessmentSession,
+                    dataContract = dataContract,
                     candidates = candidates,
                     index = index + 1,
                     errors = errors,
@@ -189,20 +192,20 @@ class SteplyWebClient(
         }
     }
 
-    private fun UserProfile.toJson(): JSONObject = JSONObject()
-        .put("id", id)
-        .put("displayName", displayName)
-        .put("name", displayName)
-        .put("birthYear", birthYear)
-        .put("age", age)
-        .put("gender", gender)
-        .put("heightCm", heightCm)
-        .put("movementNotes", movementNotes)
-        .put("safetyNote", safetyNote)
-        .put("createdAt", createdAt)
-        .put("updatedAt", updatedAt)
-
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
+
+internal fun buildConnectRequestBody(
+    session: SteplyWebSessionPayload,
+    assessmentSession: AssessmentSession?,
+    dataContract: SteplyDataContract,
+): JSONObject = JSONObject()
+    .put("connectionSessionId", session.sessionId)
+    .put("sessionId", session.sessionId)
+    .put("pairingToken", session.pairingToken)
+    .put("dataContract", SteplyDataContractJsonCodec.encodeObject(dataContract))
+    .also { body ->
+        assessmentSession?.let { body.put("assessmentSession", AssessmentSessionJsonCodec.sessionToJson(it)) }
+    }

@@ -1,8 +1,7 @@
 package com.steply.app.report
 
-import com.steply.app.domain.model.MovementHistory
-import org.json.JSONArray
-import org.json.JSONObject
+import com.steply.app.domain.model.BalanceStage
+import com.steply.app.sync.SteplyLocalReportData
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -15,299 +14,179 @@ data class WeeklyReport(
     val generatedAtMs: Long,
     val sourceCount: Int,
     val latestRiskLevel: String?,
+    val previousRiskLevel: String?,
+    val riskChanged: Boolean,
     val weakAreas: List<String>,
+    val recentAssessments: List<WeeklyRecentAssessment>,
     val trends: List<WeeklyTrend>,
     val exerciseCompletion: WeeklyExerciseCompletion?,
+    val adherence: WeeklyAdherence,
+    val safetyEvents: List<String>,
+    val fallHistory: WeeklyFallHistory,
+    val invalidAssessmentRatio: Double,
+    val recommendations: List<String>,
+    val agentActions: List<WeeklyAgentAction>,
+)
+
+data class WeeklyRecentAssessment(
+    val completedAtMs: Long,
+    val riskLevel: String,
+    val chairStandRepetitions: Int,
+    val balanceSecondsByStage: Map<BalanceStage, Double>,
 )
 
 data class WeeklyTrend(
     val label: String,
-    val values: List<Int>,
-    val delta: Int,
+    val values: List<Double>,
+    val delta: Double,
     val directionText: String,
 )
 
-data class WeeklyExerciseCompletion(
-    val percent: Int,
-    val completedCount: Int?,
-    val totalCount: Int?,
+data class WeeklyExerciseCompletion(val percent: Int, val completedCount: Int, val totalCount: Int)
+
+data class WeeklyAdherence(val completedSessions: Int, val targetSessions: Int) {
+    val percent: Int
+        get() = if (targetSessions <= 0) 0 else
+            ((completedSessions.toDouble() / targetSessions) * 100.0).roundToInt().coerceIn(0, 100)
+}
+
+data class WeeklyFallHistory(val reportedFallCount: Int, val injuriousFall: Boolean)
+
+data class WeeklyAgentAction(
+    val actionType: String,
+    val reasonCode: String,
+    val executionStatus: String,
+    val occurredAtMs: Long,
 )
 
+/** Maps the strict shared snapshot to display text without re-deriving clinical state. */
 object WeeklyReportGenerator {
-    private const val WeekMs = 7L * 24L * 60L * 60L * 1000L
-
-    fun generate(
-        items: List<MovementHistory>,
-        selectedProfileId: String?,
-        nowMs: Long = System.currentTimeMillis(),
-    ): WeeklyReport? {
-        val scopedItems = selectedProfileId?.let { id ->
-            items.filter { it.profileId == id }
-        } ?: return null
-        if (scopedItems.isEmpty()) return null
-
-        val sortedItems = scopedItems.sortedBy { it.receivedAt }
-        val recentItems = sortedItems.filter { it.receivedAt >= nowMs - WeekMs }
-        val latestItem = sortedItems.last()
-        val trendItems = recentItems.ifEmpty { sortedItems }
-
+    fun generate(contract: SteplyLocalReportData): WeeklyReport {
+        val snapshot = contract.weeklyReport
+        val adherence = WeeklyAdherence(
+            completedSessions = snapshot.adherence.completedSessions,
+            targetSessions = snapshot.adherence.targetSessions,
+        )
         return WeeklyReport(
-            profileName = latestItem.profileName?.takeIf { it.isNotBlank() } ?: "Selected profile",
-            periodStartMs = nowMs - WeekMs,
-            periodEndMs = nowMs,
-            generatedAtMs = nowMs,
-            sourceCount = recentItems.size,
-            latestRiskLevel = latestItem.pcStoredRiskLevel(),
-            weakAreas = latestItem.pcStoredWeakAreas(),
-            trends = trendItems.trends(),
-            exerciseCompletion = recentItems.weeklyExerciseCompletion(),
+            profileName = contract.profile.displayName,
+            periodStartMs = snapshot.periodStart,
+            periodEndMs = snapshot.periodEnd,
+            generatedAtMs = snapshot.generatedAt,
+            sourceCount = snapshot.recentAssessments.size,
+            latestRiskLevel = snapshot.latestRiskLevel?.name,
+            previousRiskLevel = snapshot.previousRiskLevel?.name,
+            riskChanged = snapshot.riskChanged,
+            weakAreas = snapshot.vulnerabilityIds.map { it.name },
+            recentAssessments = snapshot.recentAssessments.map {
+                WeeklyRecentAssessment(
+                    completedAtMs = it.completedAt,
+                    riskLevel = it.risk.name,
+                    chairStandRepetitions = it.chairStandRepetitions,
+                    balanceSecondsByStage = it.balanceSecondsByStage,
+                )
+            },
+            trends = buildTrends(snapshot.recentAssessments.map { assessment ->
+                linkedMapOf(
+                    "30 sec Chair Stand" to assessment.chairStandRepetitions.toDouble(),
+                    *BalanceStage.entries.map { stage ->
+                        "4-Stage Balance · ${stage.name.replace('_', ' ')}" to
+                            assessment.balanceSecondsByStage.getValue(stage)
+                    }.toTypedArray(),
+                )
+            }),
+            exerciseCompletion = WeeklyExerciseCompletion(
+                percent = adherence.percent,
+                completedCount = adherence.completedSessions,
+                totalCount = adherence.targetSessions,
+            ),
+            adherence = adherence,
+            safetyEvents = snapshot.safetyEvents.map { it.type },
+            fallHistory = WeeklyFallHistory(
+                reportedFallCount = snapshot.fallReports.size,
+                injuriousFall = snapshot.fallReports.any { it.injurious },
+            ),
+            invalidAssessmentRatio = snapshot.invalidAttempts.ratio,
+            recommendations = listOf(snapshot.recommendation.status.name),
+            agentActions = snapshot.agentRationale.map {
+                WeeklyAgentAction(
+                    actionType = it.actionType,
+                    reasonCode = it.reasonCodes.joinToString(","),
+                    executionStatus = it.executionStatus,
+                    occurredAtMs = it.occurredAt,
+                )
+            },
         )
     }
 
-    private fun List<MovementHistory>.trends(): List<WeeklyTrend> {
-        return WeeklyReportCategory.entries.mapNotNull { category ->
-            val values = filter { it.category() == category }
-                .mapNotNull { it.displayMetricValue(category) }
-                .takeLast(5)
+    private fun buildTrends(points: List<Map<String, Double>>): List<WeeklyTrend> {
+        val labels = points.flatMap { it.keys }.distinct()
+        return labels.mapNotNull { label ->
+            val values = points.mapNotNull { it[label] }
             if (values.size < 2) return@mapNotNull null
-
             val delta = values.last() - values.first()
             WeeklyTrend(
-                label = category.displayName,
+                label = label,
                 values = values,
                 delta = delta,
                 directionText = when {
-                    delta > 0 -> "up ${delta.toSignedText()}"
-                    delta < 0 -> "down ${delta.toSignedText()}"
+                    delta > 0.0 -> "up ${delta.signedText()}"
+                    delta < 0.0 -> "down ${delta.signedText()}"
                     else -> "no change"
                 },
             )
         }
     }
-
-    private fun List<MovementHistory>.weeklyExerciseCompletion(): WeeklyExerciseCompletion? {
-        val completions = mapNotNull { it.pcStoredExerciseCompletion() }
-        if (completions.isEmpty()) return null
-
-        val totalCompleted = completions.mapNotNull { it.completedCount }.sum()
-        val totalCount = completions.mapNotNull { it.totalCount }.sum()
-        if (totalCount > 0) {
-            return WeeklyExerciseCompletion(
-                percent = ((totalCompleted.toFloat() / totalCount.toFloat()) * 100f).roundToInt().coerceIn(0, 100),
-                completedCount = totalCompleted,
-                totalCount = totalCount,
-            )
-        }
-
-        return WeeklyExerciseCompletion(
-            percent = completions.map { it.percent }.average().roundToInt().coerceIn(0, 100),
-            completedCount = null,
-            totalCount = null,
-        )
-    }
 }
 
 object WeeklyReportFormatter {
-    fun format(report: WeeklyReport): String {
-        val lines = mutableListOf<String>()
-        lines += "Steply weekly movement report"
-        lines += "Shared by the phone user. This report contains saved PC final results only."
-        lines += ""
-        lines += "Profile: ${report.profileName}"
-        lines += "Period: ${report.periodStartMs.shortDate()} - ${report.periodEndMs.shortDate()}"
-        lines += "Generated: ${report.generatedAtMs.dateTime()}"
-        lines += ""
-        lines += "Latest stored risk level: ${report.latestRiskLevel ?: "No stored risk level"}"
-        lines += "Stored weak areas: ${report.weakAreas.takeIf { it.isNotEmpty() }?.joinToString() ?: "No stored weak areas"}"
-        lines += "This week's exercise completion: ${report.exerciseCompletion?.toDisplayText() ?: "No stored completion data"}"
-        lines += ""
-        lines += "Recent score direction"
-        if (report.trends.isEmpty()) {
-            lines += "- Not enough saved results to compare direction."
-        } else {
-            report.trends.forEach { trend ->
-                lines += "- ${trend.label}: ${trend.values.joinToString(" -> ")} (${trend.directionText})"
-            }
+    fun format(report: WeeklyReport): String = buildList {
+        add("Steply weekly movement report")
+        add("Shared by the phone user. This report contains deterministic saved summaries only.")
+        add("")
+        add("Profile: ${report.profileName}")
+        add("Period: ${report.periodStartMs.shortDate()} - ${report.periodEndMs.shortDate()}")
+        add("Generated: ${report.generatedAtMs.dateTime()}")
+        add("")
+        add("Risk level: ${report.latestRiskLevel ?: "No scored result"}")
+        add("Risk change: ${report.previousRiskLevel ?: "No previous-week baseline"} -> ${report.latestRiskLevel ?: "No result"}")
+        add("Active vulnerabilities: ${report.weakAreas.ifEmpty { listOf("None") }.joinToString()}")
+        add("Weekly adherence: ${report.adherence.completedSessions}/${report.adherence.targetSessions} sessions (${report.adherence.percent}%)")
+        add("Invalid assessment ratio: ${(report.invalidAssessmentRatio * 100).roundToInt()}%")
+        add("")
+        add("Recent valid assessments")
+        report.recentAssessments.forEach { assessment ->
+            add(
+                "- ${assessment.completedAtMs.shortDate()}: ${assessment.riskLevel}; " +
+                    "chair ${assessment.chairStandRepetitions}; " +
+                    BalanceStage.entries.joinToString { stage ->
+                        "${stage.name} ${assessment.balanceSecondsByStage.getValue(stage).metricText()}s"
+                    },
+            )
         }
-        lines += ""
-        lines += "Privacy note: no camera frames, pose landmarks, raw JSON, profile id, or session id are included."
-        lines += "Clinical note: score direction is an arithmetic display trend, not a diagnosis."
-        return lines.joinToString("\n")
-    }
-}
-
-private enum class WeeklyReportCategory(val displayName: String) {
-    BALANCE("4-Stage Balance"),
-    CHAIR_STAND("30 sec Chair Stand"),
-    OTHER("Other"),
-}
-
-private fun MovementHistory.category(): WeeklyReportCategory {
-    val normalized = testType
-        ?.lowercase()
-        ?.replace("_", " ")
-        ?.trim()
-        .orEmpty()
-
-    return when {
-        normalized.contains("chair") -> WeeklyReportCategory.CHAIR_STAND
-        normalized.contains("stand up") -> WeeklyReportCategory.CHAIR_STAND
-        normalized.contains("four stage") -> WeeklyReportCategory.BALANCE
-        normalized.contains("balance") -> WeeklyReportCategory.BALANCE
-        normalized.contains("standing") -> WeeklyReportCategory.BALANCE
-        normalized.contains("posture") -> WeeklyReportCategory.BALANCE
-        else -> WeeklyReportCategory.OTHER
-    }
-}
-
-private fun MovementHistory.displayMetricValue(category: WeeklyReportCategory): Int? {
-    return when (category) {
-        WeeklyReportCategory.CHAIR_STAND -> repetitionCount ?: score
-        WeeklyReportCategory.BALANCE -> score ?: durationSeconds
-        WeeklyReportCategory.OTHER -> score ?: repetitionCount ?: durationSeconds
-    }
-}
-
-private fun MovementHistory.pcStoredRiskLevel(): String? {
-    val json = finalJsonOrNull() ?: return null
-    return json.firstNonBlank(
-        "riskLevel",
-        "fallRiskLevel",
-        "steadiRiskLevel",
-        "riskCategory",
-    ) ?: json.optJSONObject("risk")?.firstNonBlank("level", "category")
-}
-
-private fun MovementHistory.pcStoredWeakAreas(): List<String> {
-    val json = finalJsonOrNull() ?: return emptyList()
-    return json.firstStringList(
-        "weakAreas",
-        "weaknesses",
-        "vulnerableAreas",
-        "weakBodyAreas",
-        "weakFunctions",
-    ).ifEmpty {
-        json.firstNonBlank(
-            "weakAreasText",
-            "weaknessSummary",
-            "vulnerableArea",
-            "weakArea",
-        )?.splitList().orEmpty()
-    }
-}
-
-private fun MovementHistory.pcStoredExerciseCompletion(): WeeklyExerciseCompletion? {
-    val json = finalJsonOrNull() ?: return null
-    val completed = json.firstInt(
-        "exerciseCompletedCount",
-        "completedExercises",
-        "weeklyCompletedExercises",
-    )
-    val total = json.firstInt(
-        "exerciseTotalCount",
-        "totalExercises",
-        "weeklyTotalExercises",
-    )
-    if (completed != null && total != null && total > 0) {
-        return WeeklyExerciseCompletion(
-            percent = ((completed.toFloat() / total.toFloat()) * 100f).roundToInt().coerceIn(0, 100),
-            completedCount = completed,
-            totalCount = total,
-        )
-    }
-
-    val percent = json.firstPercent(
-        "exerciseCompletionRate",
-        "weeklyExerciseCompletionRate",
-        "exerciseAdherenceRate",
-        "adherenceRate",
-        "completionRate",
-    ) ?: return null
-
-    return WeeklyExerciseCompletion(
-        percent = percent,
-        completedCount = completed,
-        totalCount = total,
-    )
-}
-
-private fun MovementHistory.finalJsonOrNull(): JSONObject? {
-    return runCatching { JSONObject(rawJson) }.getOrNull()
-}
-
-private fun JSONObject.firstNonBlank(vararg names: String): String? {
-    for (name in names) {
-        val value = optString(name).trim()
-        if (value.isNotBlank()) return value
-    }
-    return null
-}
-
-private fun JSONObject.firstStringList(vararg names: String): List<String> {
-    for (name in names) {
-        val values = optJSONArray(name)?.toStringList().orEmpty()
-        if (values.isNotEmpty()) return values
-    }
-    return emptyList()
-}
-
-private fun JSONObject.firstInt(vararg names: String): Int? {
-    for (name in names) {
-        if (!has(name) || isNull(name)) continue
-        val value = runCatching { getDouble(name).roundToInt() }.getOrNull()
-        if (value != null) return value
-    }
-    return null
-}
-
-private fun JSONObject.firstPercent(vararg names: String): Int? {
-    for (name in names) {
-        if (!has(name) || isNull(name)) continue
-        val value = runCatching { getDouble(name) }.getOrNull() ?: continue
-        return if (value <= 1.0) {
-            (value * 100.0).roundToInt().coerceIn(0, 100)
-        } else {
-            value.roundToInt().coerceIn(0, 100)
+        if (report.recentAssessments.isEmpty()) add("- No valid assessment summary in the current snapshot.")
+        add("")
+        add("Recent canonical direction")
+        if (report.trends.isEmpty()) add("- Not enough valid summaries to compare direction.")
+        report.trends.forEach { trend ->
+            add("- ${trend.label}: ${trend.values.joinToString(" -> ") { it.metricText() }} (${trend.directionText})")
         }
-    }
-    return null
-}
-
-private fun JSONArray.toStringList(): List<String> {
-    val values = mutableListOf<String>()
-    for (index in 0 until length()) {
-        val value = opt(index)
-        when (value) {
-            is JSONObject -> values += value.firstNonBlank("label", "name", "title", "area").orEmpty()
-            else -> values += optString(index)
+        add("")
+        add("Safety events: ${report.safetyEvents.ifEmpty { listOf("None") }.joinToString()}")
+        add("Falls: ${report.fallHistory.reportedFallCount}; injurious fall: ${report.fallHistory.injuriousFall}")
+        add("Recommendation: ${report.recommendations.joinToString()}")
+        add("")
+        add("Care-agent actions")
+        if (report.agentActions.isEmpty()) add("- No care-agent action recorded this week.")
+        report.agentActions.forEach { action ->
+            add("- ${action.actionType}: ${action.reasonCode} (${action.executionStatus})")
         }
-    }
-    return values.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        add("")
+        add("Privacy note: no camera frames, pose landmarks, raw JSON, profile id, or session id are included.")
+        add("Clinical note: displayed direction is arithmetic only and does not change the deterministic risk or prescription.")
+    }.joinToString("\n")
 }
 
-private fun String.splitList(): List<String> {
-    return split(",", "\n", ";")
-        .map { it.trim() }
-        .filter { it.isNotBlank() }
-        .distinct()
-}
-
-private fun Int.toSignedText(): String {
-    return if (this > 0) "+$this" else toString()
-}
-
-private fun WeeklyExerciseCompletion.toDisplayText(): String {
-    return if (completedCount != null && totalCount != null) {
-        "$percent% ($completedCount/$totalCount)"
-    } else {
-        "$percent%"
-    }
-}
-
-private fun Long.shortDate(): String {
-    return SimpleDateFormat("MMM d", Locale.US).format(Date(this))
-}
-
-private fun Long.dateTime(): String {
-    return SimpleDateFormat("MMM d, yyyy h:mm a", Locale.US).format(Date(this))
-}
+private fun Double.signedText(): String = String.format(Locale.US, "%+.1f", this)
+private fun Double.metricText(): String = String.format(Locale.US, "%.1f", this)
+private fun Long.shortDate(): String = SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(this))
+private fun Long.dateTime(): String = SimpleDateFormat("MMM d, yyyy h:mm a", Locale.getDefault()).format(Date(this))

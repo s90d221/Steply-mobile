@@ -27,7 +27,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,21 +52,14 @@ import com.steply.app.ui.screens.components.formatRecommendationLevelLabel
 @Composable
 fun RemoteConnectScreen(
     uiState: RemoteConnectUiState,
-    pendingRemoteCameraLink: String?,
-    onPendingRemoteCameraLinkHandled: () -> Unit,
     onQrScanned: (String) -> Unit,
     onManualQrChanged: (String) -> Unit,
     onConnectManual: () -> Unit,
     onChangeProfile: () -> Unit,
     onAddProfile: () -> Unit,
     onViewHistory: () -> Unit,
+    onToggleMission: (String) -> Unit,
 ) {
-    LaunchedEffect(pendingRemoteCameraLink) {
-        val value = pendingRemoteCameraLink ?: return@LaunchedEffect
-        onQrScanned(value)
-        onPendingRemoteCameraLinkHandled()
-    }
-
     val context = LocalContext.current
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -76,7 +68,7 @@ fun RemoteConnectScreen(
     }
     var isQrScannerOpen by remember { mutableStateOf(false) }
     var showExerciseMissions by remember { mutableStateOf(false) }
-    var checkedMissionIds by remember(uiState.latestExercisePlan) { mutableStateOf<Set<String>>(emptySet()) }
+    val checkedMissionIds = uiState.workoutProgress?.completedExerciseIds.orEmpty().map { it.name }.toSet()
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -124,13 +116,7 @@ fun RemoteConnectScreen(
                     RecommendedExerciseMissionList(
                         plan = plan,
                         checkedMissionIds = checkedMissionIds,
-                        onToggleMission = { missionId ->
-                            checkedMissionIds = if (missionId in checkedMissionIds) {
-                                checkedMissionIds - missionId
-                            } else {
-                                checkedMissionIds + missionId
-                            }
-                        },
+                        onToggleMission = onToggleMission,
                     )
                 }
             }

@@ -2,7 +2,6 @@ package com.steply.app.ui.screens.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -90,77 +89,6 @@ fun EmptyStateCard(
                 icon = icon,
                 onClick = onAction,
             )
-        }
-    }
-}
-
-@Composable
-fun ActionCard(
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    primary: Boolean = false,
-) {
-    val background = if (primary) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
-    val contentColor = if (primary) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    val iconContainerColor = if (primary) {
-        Color.White.copy(alpha = 0.18f)
-    } else {
-        MaterialTheme.colorScheme.primaryContainer
-    }
-
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(SteplyCorners.Card),
-        colors = CardDefaults.cardColors(containerColor = background),
-        elevation = CardDefaults.cardElevation(
-            defaultElevation = if (primary) SteplyElevation.PrimaryCard else SteplyElevation.Card,
-        ),
-    ) {
-        Row(
-            modifier = Modifier.padding(SteplySpacing.CardPadding),
-            horizontalArrangement = Arrangement.spacedBy(SteplySpacing.CardGap),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(SteplySizes.ActionIconContainer)
-                    .background(
-                        color = iconContainerColor,
-                        shape = CircleShape,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = if (primary) Color.White else MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(SteplySizes.ActionIcon),
-                )
-            }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(SteplySpacing.ExtraSmallGap),
-            ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = contentColor,
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (primary) {
-                        Color.White.copy(alpha = 0.92f)
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-            }
         }
     }
 }

@@ -213,6 +213,174 @@ class SteplyDatabaseMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrateVersion4To5_addsPersistentAssessmentSessionsWithoutDroppingExistingData() {
+        helper.createDatabase(TEST_DB, 4).apply {
+            execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `user_profiles` (
+                    `id` TEXT NOT NULL, `displayName` TEXT NOT NULL, `birthYear` INTEGER NOT NULL,
+                    `gender` TEXT, `heightCm` INTEGER, `movementNotes` TEXT, `safetyNote` TEXT,
+                    `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `archivedAt` INTEGER,
+                    PRIMARY KEY(`id`)
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `movement_history` (
+                    `id` TEXT NOT NULL, `profileId` TEXT NOT NULL, `profileName` TEXT,
+                    `sessionId` TEXT, `testType` TEXT, `score` INTEGER, `repetitionCount` INTEGER,
+                    `durationSeconds` INTEGER, `recommendationLevel` TEXT, `message` TEXT,
+                    `flagsText` TEXT, `rawJson` TEXT NOT NULL, `createdAt` INTEGER NOT NULL,
+                    `receivedAt` INTEGER NOT NULL, PRIMARY KEY(`id`)
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                "INSERT INTO `user_profiles` (`id`,`displayName`,`birthYear`,`createdAt`,`updatedAt`) " +
+                    "VALUES ('profile-v4','Existing',1950,1,1)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(
+            TEST_DB,
+            5,
+            true,
+            *SteplyDatabase.ALL_MIGRATIONS,
+        )
+
+        db.query("SELECT COUNT(*) FROM `user_profiles` WHERE `id` = 'profile-v4'").use { cursor ->
+            cursor.moveToFirst()
+            assertEquals(1, cursor.getInt(0))
+        }
+        db.query("SELECT COUNT(*) FROM `assessment_sessions`").use { cursor ->
+            cursor.moveToFirst()
+            assertEquals(0, cursor.getInt(0))
+        }
+        db.close()
+    }
+
+    @Test
+    fun S4_MIGRATION_01_migrateVersion5To6AddsDurableCareTables() {
+        helper.createDatabase(TEST_DB, 5).close()
+
+        val db = helper.runMigrationsAndValidate(
+            TEST_DB,
+            6,
+            true,
+            *SteplyDatabase.ALL_MIGRATIONS,
+        )
+
+        listOf(
+            "care_agent_states",
+            "care_events",
+            "care_decision_logs",
+            "care_action_receipts",
+        ).forEach { table ->
+            db.query("SELECT COUNT(*) FROM `$table`").use { cursor ->
+                cursor.moveToFirst()
+                assertEquals(0, cursor.getInt(0))
+            }
+        }
+        db.query("PRAGMA table_info(`care_action_receipts`)").use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            val columns = buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+            assertEquals(true, "attemptResultsJson" in columns)
+            assertEquals(true, "actionSchemaVersion" in columns)
+            assertEquals(true, "toolResultSchemaVersion" in columns)
+        }
+        db.close()
+    }
+
+    @Test
+    fun REQ_S5_DB_01_migrateVersion6To7AddsTypedStage5TablesAndPreservesProfiles() {
+        helper.createDatabase(TEST_DB, 6).apply {
+            execSQL(
+                "INSERT INTO `user_profiles` (`id`,`displayName`,`birthYear`,`createdAt`,`updatedAt`) " +
+                    "VALUES ('profile-v6','Existing',1950,1,1)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(
+            TEST_DB,
+            7,
+            true,
+            *SteplyDatabase.ALL_MIGRATIONS,
+        )
+
+        db.query("SELECT COUNT(*) FROM `user_profiles` WHERE `id` = 'profile-v6'").use { cursor ->
+            cursor.moveToFirst()
+            assertEquals(1, cursor.getInt(0))
+        }
+        listOf(
+            "assessment_summaries",
+            "workout_sessions",
+            "exercise_completions",
+            "landmark_series",
+        ).forEach { table ->
+            db.query("SELECT COUNT(*) FROM `$table`").use { cursor ->
+                cursor.moveToFirst()
+                assertEquals(0, cursor.getInt(0))
+            }
+        }
+        db.query("PRAGMA table_info(`landmark_series`)").use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            val columns = buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+            assertEquals(true, "samplesJson" in columns)
+            assertEquals(false, "rawFrames" in columns)
+        }
+        db.close()
+    }
+
+    @Test
+    fun REQ_S6_M01_migrateVersion7To8DropsLegacyHistoryAndPreservesCanonicalData() {
+        helper.createDatabase(TEST_DB, 7).apply {
+            execSQL(
+                "INSERT INTO `user_profiles` (`id`,`displayName`,`birthYear`,`createdAt`,`updatedAt`) " +
+                    "VALUES ('profile-v7','Existing',1950,1,1)",
+            )
+            execSQL(
+                "INSERT INTO `movement_history` (`id`,`profileId`,`rawJson`,`createdAt`,`receivedAt`) " +
+                    "VALUES ('legacy-history','profile-v7','{}',1,1)",
+            )
+            execSQL(
+                "INSERT INTO `assessment_summaries` " +
+                    "(`assessmentSessionId`,`schemaVersion`,`profileId`,`completedAt`,`risk`,`vulnerabilityIdsJson`," +
+                    "`chairStandRepetitions`,`sideBySideSeconds`,`semiTandemSeconds`,`tandemSeconds`,`oneLegSeconds`,`valid`,`updatedAt`) " +
+                    "VALUES ('assessment-v7','assessment_summary.v1','profile-v7',1,'LOW','[]',10,10,10,10,1,1,1)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(
+            TEST_DB,
+            8,
+            true,
+            *SteplyDatabase.ALL_MIGRATIONS,
+        )
+
+        db.query("SELECT COUNT(*) FROM `user_profiles` WHERE `id` = 'profile-v7'").use { cursor ->
+            cursor.moveToFirst()
+            assertEquals(1, cursor.getInt(0))
+        }
+        db.query("SELECT COUNT(*) FROM `assessment_summaries` WHERE `assessmentSessionId` = 'assessment-v7'").use { cursor ->
+            cursor.moveToFirst()
+            assertEquals(1, cursor.getInt(0))
+        }
+        db.query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'movement_history'").use { cursor ->
+            cursor.moveToFirst()
+            assertEquals(0, cursor.getInt(0))
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "steply-migration-test.db"
     }

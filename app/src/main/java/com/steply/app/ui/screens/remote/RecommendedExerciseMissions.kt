@@ -34,7 +34,12 @@ import com.steply.app.ui.screens.components.SteplyCard
 import com.steply.app.ui.screens.components.SteplySpacing
 import com.steply.app.ui.screens.components.formatRecommendationLevelLabel
 import kotlinx.coroutines.delay
-import org.json.JSONObject
+import com.steply.app.domain.model.AssessmentSession
+import com.steply.app.domain.model.ExerciseCategory
+import com.steply.app.domain.model.OtagoPlanStatus
+import com.steply.app.domain.model.PrescribedExercise
+import com.steply.app.domain.model.PrescriptionStatus
+import com.steply.app.domain.model.hasScoredAggregate
 
 data class RecommendedExerciseMission(
     val id: String,
@@ -45,10 +50,34 @@ data class RecommendedExerciseMission(
 )
 
 data class RecommendedExercisePlan(
+    val profileId: String,
+    val planId: String,
     val testLabel: String,
     val recommendationLevel: String,
     val exercises: List<RecommendedExerciseMission>,
+    val vulnerabilityIds: List<String> = emptyList(),
+    val professionalReviewRequired: Boolean = false,
+    val supervisionRequirement: String? = null,
+    val exerciseStartBlocked: Boolean = false,
 )
+
+internal data class BlockedExercisePlanCopy(
+    val title: String,
+    val message: String,
+)
+
+internal fun blockedExercisePlanCopy(plan: RecommendedExercisePlan): BlockedExercisePlanCopy =
+    if (plan.professionalReviewRequired) {
+        BlockedExercisePlanCopy(
+            title = "Professional approval required",
+            message = "This supported plan is saved, but exercise cannot start until a professional approves it.",
+        )
+    } else {
+        BlockedExercisePlanCopy(
+            title = "No targeted exercises available",
+            message = "No V1-V9 exercise target was identified. Review the assessment results before starting an exercise plan.",
+        )
+    }
 
 @Composable
 fun RecommendedExerciseMissionList(
@@ -56,6 +85,15 @@ fun RecommendedExerciseMissionList(
     checkedMissionIds: Set<String>,
     onToggleMission: (String) -> Unit,
 ) {
+    if (plan.exerciseStartBlocked) {
+        val copy = blockedExercisePlanCopy(plan)
+        EmptyStateCard(
+            title = copy.title,
+            message = copy.message,
+            icon = Icons.Default.Warning,
+        )
+        return
+    }
     if (plan.exercises.isEmpty()) {
         EmptyStateCard(
             title = "No recommended exercises yet",
@@ -126,19 +164,7 @@ private fun MissionCheckCard(
     isCompleted: Boolean,
     onDone: () -> Unit,
 ) {
-    var isCompleting by remember(mission.id) { mutableStateOf(false) }
-
-    LaunchedEffect(isCompleting, isCompleted) {
-        if (isCompleting && !isCompleted) {
-            delay(650)
-            onDone()
-        }
-    }
-
-    AnimatedVisibility(
-        visible = !isCompleted,
-        exit = fadeOut() + shrinkVertically(),
-    ) {
+    AnimatedVisibility(visible = true) {
         SteplyCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -146,13 +172,8 @@ private fun MissionCheckCard(
                 verticalAlignment = Alignment.Top,
             ) {
                 Checkbox(
-                    checked = isCompleting || isCompleted,
-                    onCheckedChange = { checked ->
-                        if (checked && !isCompleting && !isCompleted) {
-                            isCompleting = true
-                        }
-                    },
-                    enabled = !isCompleting && !isCompleted,
+                    checked = isCompleted,
+                    onCheckedChange = { onDone() },
                 )
                 Column(
                     modifier = Modifier.weight(1f),
@@ -169,7 +190,7 @@ private fun MissionCheckCard(
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.onSurface,
                         )
-                        if (isCompleting) {
+                        if (isCompleted) {
                             StatusChip(
                                 text = "Done",
                                 color = MaterialTheme.colorScheme.primaryContainer,
@@ -235,43 +256,70 @@ private fun SafetyNoteSurface(text: String) {
     }
 }
 
-fun parseRecommendedExercisePlan(resultJson: String): RecommendedExercisePlan? {
-    // Display only the recommendation plan produced by the PC web analysis.
-    // Mobile must not derive exercises from pose landmarks or raw movement data.
-    return runCatching {
-        val json = JSONObject(resultJson)
-        val recommendations = json.optJSONArray("recommendations") ?: return null
-        val exercises = mutableListOf<RecommendedExerciseMission>()
-        for (index in 0 until recommendations.length()) {
-            val item = recommendations.optJSONObject(index) ?: continue
-            val title = item.optString("title").takeIf { it.isNotBlank() } ?: continue
-            exercises += RecommendedExerciseMission(
-                id = "${json.optString("id", "result")}-$index-$title",
-                title = title,
-                description = item.optString("description").takeIf { it.isNotBlank() } ?: "Practice this movement gently.",
-                safetyNote = item.optString("safetyNote").takeIf { it.isNotBlank() } ?: "Stop if there is pain, dizziness, or discomfort.",
-                durationSeconds = item.optInt("durationSeconds", 60),
+fun parseRecommendedExercisePlan(session: AssessmentSession): RecommendedExercisePlan? {
+    if (!session.hasScoredAggregate()) return null
+    val plan = session.exercisePrescription.plan ?: return null
+    val blocked = session.exercisePrescription.status == PrescriptionStatus.PENDING_PROFESSIONAL_REVIEW ||
+        plan.status != OtagoPlanStatus.ACTIVE
+    val safetyNote = buildList {
+        addAll(plan.safetyNotices)
+        add("Supervision: ${plan.supervisionRequirement.name}")
+    }.joinToString(" ")
+    val exercises = buildList {
+        (plan.warmups + plan.selectedExercises).forEach { add(it.toMission(safetyNote)) }
+        plan.walkingPlan?.let { walking ->
+            add(
+                RecommendedExerciseMission(
+                    id = walking.exerciseId.name,
+                    title = "Walking plan",
+                    description = "${walking.targetMinutes} minutes at usual pace, ${walking.weeklyFrequency} times weekly; may split into ${walking.splitMinutes.joinToString("+")} minutes.",
+                    safetyNote = safetyNote,
+                    durationSeconds = walking.targetMinutes * 60,
+                ),
             )
         }
-        if (exercises.isEmpty()) return null
-        val rawTestLabel = json.optString("testLabel").takeIf { it.isNotBlank() }
-            ?: json.optString("testType").takeIf { it.isNotBlank() }
-            ?: "Movement Check"
-        RecommendedExercisePlan(
-            testLabel = rawTestLabel.toDisplayLabel(),
-            recommendationLevel = json.optString("recommendationLevel").takeIf { it.isNotBlank() }
-                ?: "Recommended",
-            exercises = exercises,
-        )
-    }.getOrNull()
+    }
+    return RecommendedExercisePlan(
+        profileId = session.profileId,
+        planId = plan.planId,
+        testLabel = "STEADI Assessment",
+        recommendationLevel = session.steadi.risk.name,
+        exercises = exercises,
+        vulnerabilityIds = plan.vulnerabilityIds.map { it.name },
+        professionalReviewRequired = plan.requiresProfessionalReview,
+        supervisionRequirement = plan.supervisionRequirement.name,
+        exerciseStartBlocked = blocked,
+    )
 }
 
-private fun String.toDisplayLabel(): String {
-    val trimmed = trim()
-    if ('_' !in trimmed && trimmed.any { it.isLowerCase() }) return trimmed
-
-    return trimmed
-        .replace('_', ' ')
-        .lowercase()
-        .replaceFirstChar { char -> char.titlecase() }
+private fun PrescribedExercise.toMission(safetyNote: String): RecommendedExerciseMission {
+    val dosage = buildList {
+        repetitions?.let { add("$it repetitions") }
+        repetitionsPerSide?.let { add("$it repetitions per side") }
+        steps?.let { add("$it steps") }
+        holdSeconds?.let { add("hold $it seconds") }
+        sets?.let { add("$it sets") }
+        if (weakSideExtraSets > 0) add("$weakSideExtraSets extra set on the weaker side")
+    }.joinToString(", ")
+    val load = when (weightMode.name) {
+        "NONE" -> "no added weight"
+        else -> "$weightMode ${weightMinKg}-${weightMaxKg} kg"
+    }
+    val detail = buildList {
+        add("Level ${level.name}; $dosage; support: ${supportRequirement.name}; $load.")
+        if (category == ExerciseCategory.STRENGTH) {
+            add("Tempo ${tempoUpMinSeconds}-${tempoUpMaxSeconds}s up, ${tempoDownMinSeconds}-${tempoDownMaxSeconds}s down; rest ${restMinSeconds}-${restMaxSeconds}s. $breathingRule")
+        } else {
+            add(breathingRule)
+        }
+        add("Camera verification: ${cameraVerification.name}.")
+    }.joinToString(" ")
+    val seconds = when {
+        holdSeconds != null -> holdSeconds * (sets ?: 1)
+        repetitionsPerSide != null -> repetitionsPerSide * 2 * (sets ?: 1) * 5
+        repetitions != null -> repetitions * (sets ?: 1) * 5
+        steps != null -> steps * (sets ?: 1) * 2
+        else -> 1
+    }
+    return RecommendedExerciseMission(exerciseId.name, displayName, detail, safetyNote, seconds.coerceAtLeast(1))
 }
